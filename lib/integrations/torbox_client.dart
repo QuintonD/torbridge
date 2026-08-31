@@ -1,0 +1,270 @@
+import 'package:dio/dio.dart';
+
+class TorBoxApiException implements Exception {
+  const TorBoxApiException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => 'TorBox: $message';
+}
+
+class TorBoxFile {
+  const TorBoxFile({required this.id, required this.name, required this.size});
+
+  final int id;
+  final String name;
+  final int size;
+
+  bool get isVideo => RegExp(
+    r'\.(mkv|mp4|avi|mov|m4v|webm|ts)$',
+    caseSensitive: false,
+  ).hasMatch(name);
+}
+
+class TorBoxTorrent {
+  const TorBoxTorrent({
+    required this.id,
+    required this.hash,
+    required this.name,
+    required this.files,
+  });
+
+  final int id;
+  final String hash;
+  final String name;
+  final List<TorBoxFile> files;
+
+  TorBoxFile? preferredFile([int? sourceFileIndex]) {
+    if (sourceFileIndex != null && sourceFileIndex >= 0) {
+      if (sourceFileIndex < files.length) return files[sourceFileIndex];
+      for (final file in files) {
+        if (file.id == sourceFileIndex) return file;
+      }
+    }
+    final videoFiles = files.where((file) => file.isVideo).toList()
+      ..sort((a, b) => b.size.compareTo(a.size));
+    if (videoFiles.isNotEmpty) return videoFiles.first;
+    return files.isEmpty ? null : files.first;
+  }
+}
+
+class TorBoxClient {
+  TorBoxClient(this._apiToken, {Dio? dio})
+    : _dio = dio ?? Dio(BaseOptions(baseUrl: 'https://api.torbox.app'));
+
+  final String _apiToken;
+  final Dio _dio;
+
+  Options get _authorized => Options(
+    headers: {'Authorization': 'Bearer $_apiToken'},
+    contentType: Headers.jsonContentType,
+  );
+
+  Future<void> validateToken() async {
+    final response = await _dio.get<Map<String, dynamic>>(
+      '/v1/api/user/me',
+      options: _authorized,
+    );
+    _requireSuccess(response.data);
+  }
+
+  Future<bool> isCached(String infoHash) async {
+    final cached = await cachedHashes([infoHash]);
+    return cached.contains(infoHash.toLowerCase());
+  }
+
+  Future<Set<String>> cachedHashes(Iterable<String> infoHashes) async {
+    final hashes = infoHashes
+        .map((hash) => hash.trim().toLowerCase())
+        .where((hash) => hash.isNotEmpty)
+        .toSet();
+    if (hashes.isEmpty) return const {};
+
+    final response = await _dio.post<Map<String, dynamic>>(
+      '/v1/api/torrents/checkcached',
+      data: {'hashes': hashes.toList(growable: false)},
+      queryParameters: const {'format': 'object', 'list_files': true},
+      options: _authorized,
+    );
+    final data = _data(response.data);
+    final cached = <String>{};
+    if (data is Map) {
+      for (final entry in data.entries) {
+        final hash = '${entry.key}'.toLowerCase();
+        if (!hashes.contains(hash)) continue;
+        final value = entry.value;
+        if (value == true || value is Map && value.isNotEmpty) {
+          cached.add(hash);
+        }
+      }
+    } else if (data is List) {
+      for (final value in data) {
+        if (value is String && hashes.contains(value.toLowerCase())) {
+          cached.add(value.toLowerCase());
+        } else if (value is Map) {
+          final hash = '${value['hash'] ?? value['torrent_hash'] ?? ''}'
+              .toLowerCase();
+          if (hashes.contains(hash)) cached.add(hash);
+        }
+      }
+    }
+    return cached;
+  }
+
+  Future<TorBoxTorrent> ensureTorrent({
+    required String infoHash,
+    bool cachedOnly = true,
+  }) async {
+    final existing = await findTorrentByHash(infoHash);
+    if (existing != null) return existing;
+
+    final response = await _dio.post<Map<String, dynamic>>(
+      '/v1/api/torrents/createtorrent',
+      data: FormData.fromMap({
+        'magnet': 'magnet:?xt=urn:btih:${infoHash.toLowerCase()}',
+        'add_only_if_cached': cachedOnly,
+        'allow_zip': false,
+      }),
+      options: Options(headers: {'Authorization': 'Bearer $_apiToken'}),
+    );
+    _requireSuccess(response.data);
+    final created = _data(response.data);
+    final torrentId = _intFrom(created, const ['torrent_id', 'id']);
+    if (torrentId != null) {
+      final torrent = await getTorrent(torrentId, bypassCache: true);
+      if (torrent != null) return torrent;
+    }
+    final found = await findTorrentByHash(infoHash, bypassCache: true);
+    if (found == null) {
+      throw const TorBoxApiException(
+        'Torrent was added but its files are not available yet.',
+      );
+    }
+    return found;
+  }
+
+  Future<TorBoxTorrent?> getTorrent(int id, {bool bypassCache = false}) async {
+    final response = await _dio.get<Map<String, dynamic>>(
+      '/v1/api/torrents/mylist',
+      queryParameters: {'id': id, 'bypass_cache': bypassCache},
+      options: _authorized,
+    );
+    _requireSuccess(response.data);
+    final value = _data(response.data);
+    if (value is Map) return _parseTorrent(Map<String, dynamic>.from(value));
+    if (value is List && value.isNotEmpty && value.first is Map) {
+      return _parseTorrent(Map<String, dynamic>.from(value.first as Map));
+    }
+    return null;
+  }
+
+  Future<TorBoxTorrent?> findTorrentByHash(
+    String infoHash, {
+    bool bypassCache = false,
+  }) async {
+    final response = await _dio.get<Map<String, dynamic>>(
+      '/v1/api/torrents/mylist',
+      queryParameters: {'bypass_cache': bypassCache, 'limit': 1000},
+      options: _authorized,
+    );
+    _requireSuccess(response.data);
+    final value = _data(response.data);
+    final items = value is List ? value : [value];
+    for (final item in items) {
+      if (item is! Map) continue;
+      final map = Map<String, dynamic>.from(item);
+      final hash = '${map['hash'] ?? map['torrent_hash'] ?? ''}'.toLowerCase();
+      if (hash == infoHash.toLowerCase()) return _parseTorrent(map);
+    }
+    return null;
+  }
+
+  Future<Uri> requestDownloadLink({
+    required int torrentId,
+    required int fileId,
+  }) async {
+    // TorBox documents the token query parameter as required for this endpoint.
+    // The resulting short-lived CDN URL is returned to the caller but never
+    // persisted by this client.
+    final response = await _dio.get<Map<String, dynamic>>(
+      '/v1/api/torrents/requestdl',
+      queryParameters: {
+        'token': _apiToken,
+        'torrent_id': torrentId,
+        'file_id': fileId,
+        'zip_link': false,
+        'redirect': false,
+      },
+      options: Options(contentType: Headers.jsonContentType),
+    );
+    _requireSuccess(response.data);
+    final data = _data(response.data);
+    final text = switch (data) {
+      String value => value,
+      Map value => '${value['url'] ?? value['download_url'] ?? ''}',
+      _ => '',
+    };
+    final uri = Uri.tryParse(text);
+    if (uri == null || !uri.hasScheme) {
+      throw const TorBoxApiException('No download link was returned.');
+    }
+    return uri;
+  }
+
+  TorBoxTorrent _parseTorrent(Map<String, dynamic> value) {
+    final filesValue = value['files'];
+    final files = <TorBoxFile>[];
+    if (filesValue is List) {
+      for (var index = 0; index < filesValue.length; index++) {
+        final item = filesValue[index];
+        if (item is! Map) continue;
+        final map = Map<String, dynamic>.from(item);
+        files.add(
+          TorBoxFile(
+            id: _intFrom(map, const ['id', 'file_id']) ?? index,
+            name:
+                '${map['short_name'] ?? map['name'] ?? map['path'] ?? 'File ${index + 1}'}',
+            size: _intFrom(map, const ['size', 'bytes']) ?? 0,
+          ),
+        );
+      }
+    }
+    return TorBoxTorrent(
+      id: _intFrom(value, const ['id', 'torrent_id']) ?? -1,
+      hash: '${value['hash'] ?? value['torrent_hash'] ?? ''}',
+      name: '${value['name'] ?? 'Torrent'}',
+      files: List.unmodifiable(files),
+    );
+  }
+
+  Object? _data(Map<String, dynamic>? response) {
+    _requireSuccess(response);
+    return response?['data'];
+  }
+
+  void _requireSuccess(Map<String, dynamic>? response) {
+    if (response == null) {
+      throw const TorBoxApiException('Empty response.');
+    }
+    if (response['success'] == false) {
+      throw TorBoxApiException(
+        '${response['detail'] ?? response['error'] ?? 'Request failed'}',
+      );
+    }
+  }
+
+  int? _intFrom(Object? value, List<String> keys) {
+    if (value is! Map) return null;
+    for (final key in keys) {
+      final candidate = value[key];
+      if (candidate is int) return candidate;
+      if (candidate is num) return candidate.toInt();
+      if (candidate is String) {
+        final parsed = int.tryParse(candidate);
+        if (parsed != null) return parsed;
+      }
+    }
+    return null;
+  }
+}
