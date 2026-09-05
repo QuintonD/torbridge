@@ -9,19 +9,29 @@ Run date: 2026-08-31
 | Static analysis | Flutter analyzer over app, tests, integration tests, and platform bindings | Pass, no issues |
 | Recommendation | hard filters, weighted ranking, reasons, deterministic ordering, and preference-driven reranking | Pass |
 | Source parsing | quality, codec, HDR, languages, size, cache, and release tags | Pass |
-| HTTP contracts | AIOStreams configured resource path, TorBox file/link and batched cache lookup, and Trakt scrobble envelope | Pass with mocked endpoints |
-| Local persistence | preferences, watched IDs, and completed download records | Pass |
-| Desktop UI | wide Discover -> ranked recommendation -> download -> watched -> player -> Settings journey | Pass |
-| Phone UI | compact navigation, language controls, quality controls, and reranking | Pass |
-| Android E2E | mark watched, real system download, Ready offline, ExoPlayer initialization, error-free player surface, reranking, and reset | Pass on the API 36 Android Studio emulator |
-| Android visual replay | real app download, Ready offline, offline playback, rendered video frame, Dutch/4K reranking, and reset | Pass through Computer Use |
-| Windows visual replay | final packaged x64 build launch and Settings mutation; full download/player journey on the immediately preceding package | Pass through Computer Use |
+| HTTP contracts | Cinemeta episode metadata, AIOStreams canonical episode paths, TorBox file/cache lookup, Trakt movie/episode scrobbles, and paginated watched sync | Pass with mocked endpoints |
+| Local Stremio addon | manifest, exact `tt…:season:episode` matching, stream metadata, binge group, and partial byte-range response | Pass against a real loopback server |
+| Local persistence | preferences including cleanup delay, exact watched IDs, v1-compatible download records, and queued Android job fields | Pass |
+| Cleanup | completed watched download removed at the configured zero-day boundary | Pass with deletion spy |
+| QR setup transfer | QR excludes credentials, AES-256-GCM bundle round-trip, tamper rejection, one-time claim, preference/credential import, and device-local download exclusion | Pass against a real loopback socket |
+| Desktop UI | artwork/fallbacks, source/audio/subtitle tags, download actions, five-destination navigation, Settings, and Diagnostics | Pass in widget suite and release-build visual replay |
+| Phone UI | compact navigation, language/quality/cleanup controls, reranking, and Diagnostics | Pass |
+| Android platform compile | Download Manager reconciliation, foreground loopback server, camera permission, and ML Kit QR scanner | Pass in release APK build |
+| Windows visual replay | v1.2 release build: Transfer setup card, generated QR, verification code, service summary, expiry guidance, and existing connection state | Pass through Computer Use |
 | Release builds | optimized universal Android APK and self-contained Windows x64 ZIP | Pass |
 
-The host suite contains 11 passing tests. The expanded Android integration test
-uses a small CC0 MP4 and the real Android Download Manager; it does not mock the
-download or player boundary. Earlier compatibility runs also passed on API 30
-and API 34 emulators; the final ExoPlayer regression replay was run on API 36.
+The host suite contains 20 passing tests. The checked-in Android integration
+test uses a small CC0 MP4 and the real Android Download Manager; it does not
+mock the download or player boundary. Its previously validated playback route
+now selects **Play in TorBridge** from the fallback menu. Earlier compatibility
+runs passed on API 30, API 34, and API 36; the v1.1 turn compiled both debug and
+release Android variants but did not have an emulator attached for a new E2E
+run.
+
+The v1.1 Windows visual pass found and corrected one misleading diagnostic
+severity: “no missing paths detected” originally matched the word “missing” and
+showed an error icon. The final predicate only marks an actual nonzero missing
+file count as a failure.
 
 ## Improvement-loop findings
 
@@ -76,5 +86,5 @@ them to the operating-system credential vault.
 
 | Artifact | Size | SHA-256 |
 | --- | ---: | --- |
-| `TorBridge-Android-1.0.0.apk` | 101,440,942 bytes | `3FC8C1EB4D028C5449B1D85F84E5916279E1EBC0B214CB37072EF05BB1B8C598` |
-| `TorBridge-Windows-x64-1.0.0.zip` | 33,723,078 bytes | `89E3C746936E143A07B90C1E82D55EFFF87EDFC045C224EC6B1A03BB860734FA` |
+| `TorBridge-Android-1.2.0.apk` | 119,150,629 bytes | `E62B2E4AE39C5C4B67A72E6A71D05CE10B4B8356D206EA2FBE008F75D945B44A` |
+| `TorBridge-Windows-x64-1.2.0.zip` | 33,990,760 bytes | `6C7F0822382E9452C756A9B6FD482AA0892D3ECAF70DF93A61DD6D5311FEC988` |

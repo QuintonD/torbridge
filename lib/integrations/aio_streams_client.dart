@@ -4,9 +4,17 @@ import '../domain/media_models.dart';
 import '../domain/stream_parser.dart';
 
 class AioStreamsClient {
-  AioStreamsClient({Dio? dio}) : _dio = dio ?? Dio();
+  AioStreamsClient({Dio? dio, List<Uri>? torrentioBaseUrls})
+    : _dio = dio ?? Dio(),
+      _torrentioBaseUrls =
+          torrentioBaseUrls ??
+          [
+            Uri.parse('https://torrentio.strem.fun'),
+            Uri.parse('https://torrentio.stremio.ru'),
+          ];
 
   final Dio _dio;
+  final List<Uri> _torrentioBaseUrls;
   final StreamParser _parser = const StreamParser();
 
   Future<Map<String, dynamic>> getManifest(Uri manifestUrl) async {
@@ -32,6 +40,31 @@ class AioStreamsClient {
     );
     final response = await _dio.getUri<Map<String, dynamic>>(resourceUrl);
     return _parser.parseResponse(response.data ?? const {});
+  }
+
+  Future<List<StreamCandidate>> getTorrentioStreams({
+    required String type,
+    required String videoId,
+  }) async {
+    if ((type != 'movie' && type != 'series') ||
+        !RegExp(r'^tt\d+(?::\d+:\d+)?$').hasMatch(videoId)) {
+      return const [];
+    }
+    Object? lastError;
+    for (final base in _torrentioBaseUrls) {
+      final uri = base.resolve(
+        '/stream/$type/${Uri.encodeComponent(videoId)}.json',
+      );
+      try {
+        final response = await _dio.getUri<Map<String, dynamic>>(uri);
+        final candidates = _parser.parseResponse(response.data ?? const {});
+        if (candidates.isNotEmpty) return candidates;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (lastError != null) throw lastError;
+    return const [];
   }
 
   static Uri normalizeManifestUrl(Uri input) {

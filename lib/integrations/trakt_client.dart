@@ -68,11 +68,12 @@ class TraktMedia {
   Map<String, dynamic> toScrobbleJson() {
     if (isEpisode) {
       return {
-        'episode': {
-          'season': season,
-          'number': episode,
+        'show': {
+          'title': title,
+          'year': year,
           'ids': {'imdb': imdbId},
         },
+        'episode': {'season': season, 'number': episode},
       };
     }
     return {
@@ -200,6 +201,107 @@ class TraktClient {
       },
       options: _apiOptions(accessToken),
     );
+  }
+
+  Future<void> markWatched({
+    required String accessToken,
+    required TraktMedia media,
+    DateTime? watchedAt,
+  }) async {
+    final timestamp = (watchedAt ?? DateTime.now().toUtc()).toIso8601String();
+    final body = media.toScrobbleJson();
+    final data = media.isEpisode
+        ? {
+            'shows': [
+              {
+                ...(body['show'] as Map<String, dynamic>),
+                'seasons': [
+                  {
+                    'number': media.season,
+                    'episodes': [
+                      {'number': media.episode, 'watched_at': timestamp},
+                    ],
+                  },
+                ],
+              },
+            ],
+          }
+        : {
+            'movies': [
+              {
+                ...(body['movie'] as Map<String, dynamic>),
+                'watched_at': timestamp,
+              },
+            ],
+          };
+    await _apiDio.post<Map<String, dynamic>>(
+      '/sync/history',
+      data: data,
+      options: _apiOptions(accessToken),
+    );
+  }
+
+  Future<Set<String>> watchedVideoIds(String accessToken) async {
+    final result = <String>{};
+    await _readWatchedPages(
+      accessToken: accessToken,
+      path: '/sync/watched/movies',
+      query: const {},
+      onItem: (item) {
+        final movie = item['movie'];
+        if (movie is! Map) return;
+        final ids = movie['ids'];
+        if (ids is! Map) return;
+        final imdb = '${ids['imdb'] ?? ''}';
+        if (imdb.startsWith('tt')) result.add(imdb);
+      },
+    );
+    await _readWatchedPages(
+      accessToken: accessToken,
+      path: '/sync/watched/shows',
+      query: const {'extended': 'progress'},
+      onItem: (item) {
+        final show = item['show'];
+        if (show is! Map) return;
+        final ids = show['ids'];
+        if (ids is! Map) return;
+        final imdb = '${ids['imdb'] ?? ''}';
+        if (!imdb.startsWith('tt')) return;
+        final seasons = item['seasons'];
+        if (seasons is! List) return;
+        for (final rawSeason in seasons.whereType<Map>()) {
+          final season = _asInt(rawSeason['number']);
+          final episodes = rawSeason['episodes'];
+          if (season <= 0 || episodes is! List) continue;
+          for (final rawEpisode in episodes.whereType<Map>()) {
+            final episode = _asInt(rawEpisode['number']);
+            final plays = _asInt(rawEpisode['plays']);
+            if (episode > 0 && plays > 0) result.add('$imdb:$season:$episode');
+          }
+        }
+      },
+    );
+    return result;
+  }
+
+  Future<void> _readWatchedPages({
+    required String accessToken,
+    required String path,
+    required Map<String, dynamic> query,
+    required void Function(Map<String, dynamic> item) onItem,
+  }) async {
+    for (var page = 1; page <= 100; page++) {
+      final response = await _apiDio.get<List<dynamic>>(
+        path,
+        queryParameters: {...query, 'page': page, 'limit': 100},
+        options: _apiOptions(accessToken),
+      );
+      final items = response.data ?? const [];
+      for (final raw in items.whereType<Map>()) {
+        onItem(Map<String, dynamic>.from(raw));
+      }
+      if (items.length < 100) break;
+    }
   }
 
   Options _apiOptions(String accessToken) => Options(

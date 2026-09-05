@@ -19,6 +19,56 @@ void main() {
     expect(candidate.releaseTags, contains('webdl'));
   });
 
+  test('Stremio proxy request headers are preserved for downloads', () {
+    final candidate = const StreamParser().parseStream({
+      'name': 'Header source',
+      'title': 'Episode.1080p.HEVC',
+      'url': 'https://streams.example/video',
+      'behaviorHints': {
+        'proxyHeaders': {
+          'request': {
+            'User-Agent': 'Stremio',
+            'Referer': 'https://source.example/',
+          },
+        },
+      },
+    });
+
+    expect(candidate.requestHeaders, {
+      'User-Agent': 'Stremio',
+      'Referer': 'https://source.example/',
+    });
+  });
+
+  test('AIOStreams torrent metadata is preserved behind a resolved URL', () {
+    final candidate = const StreamParser().parseStream({
+      'name': 'Torrentio TB+',
+      'description': 'Silo.S02E10.1080p.WEB-DL',
+      'url': 'https://torrentio.stremio.ru/playback/video.mkv',
+      'streamData': {
+        'torrent': {
+          'infoHash': '0123456789ABCDEF0123456789ABCDEF01234567',
+          'fileIdx': 12,
+        },
+      },
+    });
+
+    expect(candidate.infoHash, '0123456789abcdef0123456789abcdef01234567');
+    expect(candidate.fileIndex, 12);
+  });
+
+  test('Torrentio resolved URLs expose their torrent hash and file index', () {
+    final candidate = const StreamParser().parseStream({
+      'name': 'Torrentio TB+',
+      'url':
+          'https://torrentio.strem.fun/resolve/torbox/token/'
+          'fedcba9876543210fedcba9876543210fedcba98/null/7/video.mkv',
+    });
+
+    expect(candidate.infoHash, 'fedcba9876543210fedcba9876543210fedcba98');
+    expect(candidate.fileIndex, 7);
+  });
+
   test('recommended source respects quality and language preferences', () {
     final result = const RecommendationEngine().rank(
       demoCandidates(),

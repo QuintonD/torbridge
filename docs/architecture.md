@@ -2,9 +2,10 @@
 
 ## Decision
 
-TorBridge is a focused Flutter companion rather than a Stremio fork. One Dart
-UI and domain layer serves Android and Windows, while downloads use the native
-behavior appropriate to each platform.
+TorBridge is a focused Flutter download companion and loopback Stremio addon
+rather than a Stremio fork. One Dart UI and domain layer serves Android and
+Windows, while downloads and long-lived local serving use the native behavior
+appropriate to each platform.
 
 This boundary is deliberate. The Stremio addon protocol exposes resources such
 as `/stream/{type}/{id}.json`, and a stream response supplies a direct URL,
@@ -41,7 +42,16 @@ Android Download    Windows file
 Manager             download
        └──────┬────────┘
               ▼
-       local MPV playback ──► Trakt scrobble/history
+      exact movie/episode identity
+              │
+              ▼
+  localhost Stremio addon + byte-range media route
+              │
+              ▼
+        Stremio playback ──► Trakt scrobble/history
+              │
+              ▼
+   TorBridge watched sync ──► optional delayed file removal
 ```
 
 ## Modules
@@ -49,9 +59,15 @@ Manager             download
 - `lib/domain`: candidate model, metadata parser, explainable ranking engine.
 - `lib/integrations`: Cinemeta, AIOStreams, TorBox, and Trakt HTTP contracts.
 - `lib/services`: secure credentials, local state, and platform downloads.
+- `lib/services/stremio_bridge_service.dart`: the Windows loopback addon/range
+  server and Android platform-channel contract.
+- `lib/services/setup_transfer_service.dart`: one-time LAN setup transfer,
+  authenticated encryption, QR session creation, and QR redemption.
 - `lib/features`: responsive Discover, Downloads, Library, Settings, and Player
   screens.
 - `android/.../MainActivity.kt`: narrow Download Manager method channel.
+- `android/.../StremioBridgeService.kt`: foreground loopback addon and media
+  server that remains available while Stremio is in the foreground.
 - `vendor/flutter_secure_storage_windows`: upstream Windows secure-storage
   implementation with ATL-only UTF conversion replaced by Win32 conversion so
   the standard Visual Studio desktop workload is sufficient.
@@ -77,12 +93,34 @@ service contracts are documented in the
 
 ## State
 
-SharedPreferences stores non-secret preferences, local watched IDs, and
-completed download metadata. The platform credential store contains the
+SharedPreferences stores non-secret preferences, exact watched video IDs, and
+versioned queued/completed download metadata. Version 1 records without episode
+fields remain readable. The platform credential store contains the
 AIOStreams manifest URL, TorBox token, Trakt app credentials, and Trakt tokens.
-Ephemeral CDN URLs do not enter persisted app state.
+Ephemeral CDN URLs do not enter persisted app state. Android stores its system
+Download Manager ID at enqueue time and reconciles that job after restart.
+
+The bridge binds only to `127.0.0.1:11471`. Stream endpoints are keyed by the
+canonical Stremio video ID, while media endpoints accept only IDs present in
+the download registry; callers cannot request arbitrary filesystem paths. HTTP
+Range and HEAD requests are supported for seeking.
 
 The UI uses Riverpod for a single observable application state. Demo mode is an
 offline-safe fixture that exercises the complete ranking/download/player UI and
 is also used by deterministic end-to-end tests.
 
+## Setup transfer
+
+Desktop setup transfer is deliberately separate from download synchronization.
+The desktop chooses a private IPv4 interface, opens an ephemeral TCP listener,
+and displays a `torbridge://pair` QR containing the address, port, a 192-bit
+single-use authorization token, and a random 256-bit AES key. Service
+credentials never enter the QR.
+
+The Android scanner redeems the token while both devices are on the same LAN.
+The desktop serializes service connections and `DownloadPreferences`, encrypts
+the bundle with AES-256-GCM and authenticated protocol context, returns one
+line-delimited response, then closes the listener. The mobile preview shows a
+verification code derived from the visual pairing material before replacing
+its credential-vault entries and preferences. The offer expires after five
+minutes and cannot be redeemed twice.

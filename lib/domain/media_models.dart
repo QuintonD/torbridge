@@ -60,6 +60,8 @@ class StreamCandidate {
     this.streamUrl,
     this.infoHash,
     this.fileIndex,
+    this.filename,
+    this.requestHeaders = const {},
   });
 
   final String id;
@@ -77,6 +79,8 @@ class StreamCandidate {
   final Uri? streamUrl;
   final String? infoHash;
   final int? fileIndex;
+  final String? filename;
+  final Map<String, String> requestHeaders;
 
   StreamCandidate copyWith({CacheStatus? cacheStatus}) {
     return StreamCandidate(
@@ -95,6 +99,8 @@ class StreamCandidate {
       streamUrl: streamUrl,
       infoHash: infoHash,
       fileIndex: fileIndex,
+      filename: filename,
+      requestHeaders: requestHeaders,
     );
   }
 
@@ -126,6 +132,7 @@ class DownloadPreferences {
     this.allowUnknownAudio = true,
     this.maximumSizeBytes = 20000000000,
     this.blockedReleaseTags = const {'cam', 'telesync', 'screener'},
+    this.deleteWatchedAfterDays,
   });
 
   final List<String> audioLanguageOrder;
@@ -141,6 +148,10 @@ class DownloadPreferences {
   final int maximumSizeBytes;
   final Set<String> blockedReleaseTags;
 
+  /// Null disables automatic deletion. Zero removes the file at the next
+  /// watched-state reconciliation.
+  final int? deleteWatchedAfterDays;
+
   DownloadPreferences copyWith({
     List<String>? audioLanguageOrder,
     List<String>? subtitleLanguageOrder,
@@ -154,6 +165,7 @@ class DownloadPreferences {
     bool? allowUnknownAudio,
     int? maximumSizeBytes,
     Set<String>? blockedReleaseTags,
+    Object? deleteWatchedAfterDays = _unchanged,
   }) {
     return DownloadPreferences(
       audioLanguageOrder: audioLanguageOrder ?? this.audioLanguageOrder,
@@ -170,9 +182,14 @@ class DownloadPreferences {
       allowUnknownAudio: allowUnknownAudio ?? this.allowUnknownAudio,
       maximumSizeBytes: maximumSizeBytes ?? this.maximumSizeBytes,
       blockedReleaseTags: blockedReleaseTags ?? this.blockedReleaseTags,
+      deleteWatchedAfterDays: identical(deleteWatchedAfterDays, _unchanged)
+          ? this.deleteWatchedAfterDays
+          : deleteWatchedAfterDays as int?,
     );
   }
 }
+
+const Object _unchanged = Object();
 
 class RankedCandidate {
   const RankedCandidate({
