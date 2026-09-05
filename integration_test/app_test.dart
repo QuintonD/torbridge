@@ -41,8 +41,9 @@ void main() {
     expect(failed, findsNothing);
     expect(ready, findsOneWidget);
 
-    final play = find.byTooltip('Play offline');
-    await tester.tap(play);
+    await tester.tap(find.byTooltip('Download actions'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Play in TorBridge'));
     await tester.pump(const Duration(seconds: 4));
     expect(find.byType(PlayerScreen), findsOneWidget);
     expect(find.byKey(const Key('video-playback-ready')), findsOneWidget);
@@ -54,6 +55,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('cached-only')), findsOneWidget);
     expect(find.byKey(const Key('preferred-quality')), findsOneWidget);
+    expect(find.byKey(const Key('watched-cleanup-delay')), findsOneWidget);
 
     final dutchAudio = find.byKey(const Key('audio-language-Dutch'));
     await tester.ensureVisible(dutchAudio);
@@ -81,5 +83,9 @@ void main() {
     await tester.ensureVisible(fullHd);
     await tester.tap(fullHd);
     await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Diagnostics'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('run-diagnostics')), findsOneWidget);
   });
 }

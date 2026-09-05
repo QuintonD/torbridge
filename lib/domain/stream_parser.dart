@@ -27,8 +27,29 @@ class StreamParser {
     final filename = _asString(behaviorHints['filename']);
     final searchable = '$name\n$title\n$description\n$filename';
     final urlText = _asString(stream['url']);
-    final infoHash = _asString(stream['infoHash']);
-    final fileIndex = _asInt(stream['fileIdx']) ?? _asInt(stream['fileIndex']);
+    final streamData = stream['streamData'] is Map
+        ? Map<String, dynamic>.from(stream['streamData'] as Map)
+        : const <String, dynamic>{};
+    final torrent = streamData['torrent'] is Map
+        ? Map<String, dynamic>.from(streamData['torrent'] as Map)
+        : const <String, dynamic>{};
+    final streamUri = urlText.trim().isEmpty ? null : Uri.tryParse(urlText);
+    final infoHash = _firstNonEmpty([
+      _asString(stream['infoHash']),
+      _asString(stream['info_hash']),
+      _asString(torrent['infoHash']),
+      _asString(torrent['info_hash']),
+      _infoHashFromUri(streamUri),
+    ]);
+    final fileIndex =
+        _asInt(stream['fileIdx']) ??
+        _asInt(stream['fileIndex']) ??
+        _asInt(torrent['fileIdx']) ??
+        _asInt(torrent['fileIndex']) ??
+        _fileIndexFromUri(streamUri, infoHash);
+    final proxyHeaders = behaviorHints['proxyHeaders'] is Map
+        ? Map<String, dynamic>.from(behaviorHints['proxyHeaders'] as Map)
+        : const <String, dynamic>{};
     final sourceIdentity = [
       name,
       title,
@@ -52,9 +73,11 @@ class StreamParser {
       subtitleLanguages: _subtitleLanguages(searchable),
       sizeBytes: _sizeBytes(searchable),
       releaseTags: _releaseTags(searchable),
-      streamUrl: Uri.tryParse(urlText),
+      streamUrl: streamUri,
       infoHash: infoHash.isEmpty ? null : infoHash,
       fileIndex: fileIndex,
+      filename: filename.isEmpty ? null : filename,
+      requestHeaders: _stringMap(proxyHeaders['request']),
     );
   }
 
@@ -202,9 +225,58 @@ class StreamParser {
 
   String _asString(Object? value) => value is String ? value : '';
 
+  String _firstNonEmpty(Iterable<String> values) {
+    for (final value in values) {
+      final normalized = value.trim().toLowerCase();
+      if (RegExp(r'^(?:[a-f0-9]{40}|[a-z2-7]{32})$').hasMatch(normalized)) {
+        return normalized;
+      }
+    }
+    return '';
+  }
+
+  String _infoHashFromUri(Uri? uri) {
+    if (uri == null) return '';
+    final decoded = Uri.decodeComponent(uri.toString());
+    final match = RegExp(
+      r'(?<![a-z0-9])([a-f0-9]{40}|[a-z2-7]{32})(?![a-z0-9])',
+      caseSensitive: false,
+    ).firstMatch(decoded);
+    return match?.group(1)?.toLowerCase() ?? '';
+  }
+
+  int? _fileIndexFromUri(Uri? uri, String infoHash) {
+    if (uri == null) return null;
+    for (final key in const ['fileIdx', 'fileIndex', 'file_idx']) {
+      final value = uri.queryParameters[key];
+      final parsed = value == null ? null : int.tryParse(value);
+      if (parsed != null && parsed >= 0) return parsed;
+    }
+    if (infoHash.isEmpty) return null;
+    final segments = uri.pathSegments.map(Uri.decodeComponent).toList();
+    final hashIndex = segments.indexWhere(
+      (segment) => segment.toLowerCase() == infoHash,
+    );
+    if (hashIndex < 0) return null;
+    for (final segment in segments.skip(hashIndex + 1).take(3)) {
+      final parsed = int.tryParse(segment);
+      if (parsed != null && parsed >= 0) return parsed;
+    }
+    return null;
+  }
+
   int? _asInt(Object? value) => switch (value) {
     int number => number,
     String text => int.tryParse(text),
     _ => null,
   };
+
+  Map<String, String> _stringMap(Object? value) {
+    if (value is! Map) return const {};
+    return Map.unmodifiable({
+      for (final entry in value.entries)
+        if (entry.key is String && entry.value is String)
+          entry.key as String: entry.value as String,
+    });
+  }
 }

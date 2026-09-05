@@ -47,6 +47,33 @@ class TorBoxTorrent {
     if (videoFiles.isNotEmpty) return videoFiles.first;
     return files.isEmpty ? null : files.first;
   }
+
+  TorBoxFile? episodeFile(String episodeCode, [int? sourceFileIndex]) {
+    if (sourceFileIndex != null) return preferredFile(sourceFileIndex);
+    final normalizedCode = episodeCode.toLowerCase();
+    final match = RegExp(r's(\d{1,3})e(\d{1,4})').firstMatch(normalizedCode);
+    final alternatives = <String>{normalizedCode};
+    if (match != null) {
+      final season = int.parse(match.group(1)!);
+      final episode = int.parse(match.group(2)!);
+      alternatives.addAll({
+        's${season.toString().padLeft(2, '0')}e${episode.toString().padLeft(2, '0')}',
+        '${season}x${episode.toString().padLeft(2, '0')}',
+      });
+    }
+    for (final file in files.where((item) => item.isVideo)) {
+      final name = file.name.toLowerCase();
+      if (alternatives.any(name.contains)) return file;
+    }
+    return null;
+  }
+}
+
+class TorBoxFileSelection {
+  const TorBoxFileSelection({required this.torrent, required this.file});
+
+  final TorBoxTorrent torrent;
+  final TorBoxFile file;
 }
 
 class TorBoxClient {
@@ -119,10 +146,39 @@ class TorBoxClient {
     final existing = await findTorrentByHash(infoHash);
     if (existing != null) return existing;
 
+    return _createTorrent(
+      magnet: 'magnet:?xt=urn:btih:${infoHash.toLowerCase()}',
+      infoHash: infoHash,
+      cachedOnly: cachedOnly,
+    );
+  }
+
+  Future<TorBoxTorrent> ensureTorrentFromMagnet({
+    required String magnet,
+    bool cachedOnly = true,
+  }) async {
+    final infoHash = _magnetHash(magnet);
+    if (infoHash.isEmpty) {
+      throw const TorBoxApiException('The search result has no valid magnet.');
+    }
+    final existing = await findTorrentByHash(infoHash);
+    if (existing != null) return existing;
+    return _createTorrent(
+      magnet: magnet,
+      infoHash: infoHash,
+      cachedOnly: cachedOnly,
+    );
+  }
+
+  Future<TorBoxTorrent> _createTorrent({
+    required String magnet,
+    required String infoHash,
+    required bool cachedOnly,
+  }) async {
     final response = await _dio.post<Map<String, dynamic>>(
       '/v1/api/torrents/createtorrent',
       data: FormData.fromMap({
-        'magnet': 'magnet:?xt=urn:btih:${infoHash.toLowerCase()}',
+        'magnet': magnet,
         'add_only_if_cached': cachedOnly,
         'allow_zip': false,
       }),
@@ -144,6 +200,22 @@ class TorBoxClient {
     return found;
   }
 
+  Future<TorBoxTorrent> waitForFiles(
+    TorBoxTorrent torrent, {
+    int attempts = 12,
+    Duration interval = const Duration(seconds: 1),
+  }) async {
+    var current = torrent;
+    for (var attempt = 0; attempt < attempts; attempt++) {
+      if (current.files.isNotEmpty) return current;
+      if (attempt > 0) await Future<void>.delayed(interval);
+      current = await getTorrent(current.id, bypassCache: true) ?? current;
+    }
+    throw const TorBoxApiException(
+      'TorBox is still preparing the torrent files. Retry shortly.',
+    );
+  }
+
   Future<TorBoxTorrent?> getTorrent(int id, {bool bypassCache = false}) async {
     final response = await _dio.get<Map<String, dynamic>>(
       '/v1/api/torrents/mylist',
@@ -163,6 +235,14 @@ class TorBoxClient {
     String infoHash, {
     bool bypassCache = false,
   }) async {
+    final torrents = await listTorrents(bypassCache: bypassCache);
+    for (final torrent in torrents) {
+      if (torrent.hash.toLowerCase() == infoHash.toLowerCase()) return torrent;
+    }
+    return null;
+  }
+
+  Future<List<TorBoxTorrent>> listTorrents({bool bypassCache = false}) async {
     final response = await _dio.get<Map<String, dynamic>>(
       '/v1/api/torrents/mylist',
       queryParameters: {'bypass_cache': bypassCache, 'limit': 1000},
@@ -171,13 +251,48 @@ class TorBoxClient {
     _requireSuccess(response.data);
     final value = _data(response.data);
     final items = value is List ? value : [value];
+    final torrents = <TorBoxTorrent>[];
     for (final item in items) {
       if (item is! Map) continue;
-      final map = Map<String, dynamic>.from(item);
-      final hash = '${map['hash'] ?? map['torrent_hash'] ?? ''}'.toLowerCase();
-      if (hash == infoHash.toLowerCase()) return _parseTorrent(map);
+      torrents.add(_parseTorrent(Map<String, dynamic>.from(item)));
     }
-    return null;
+    return List.unmodifiable(torrents);
+  }
+
+  Future<TorBoxFileSelection?> findVideoFile({
+    required String title,
+    String? episodeCode,
+    int? year,
+  }) async {
+    final torrents = await listTorrents(bypassCache: true);
+    final titleTokens = _searchTokens(title);
+    final requiredTitleMatches = titleTokens.length > 1 ? 2 : 1;
+    final episodeTokens = _episodeTokens(episodeCode);
+    TorBoxFileSelection? best;
+    var bestScore = -1;
+
+    for (final torrent in torrents) {
+      for (final file in torrent.files.where((item) => item.isVideo)) {
+        final haystack = _normalized('${torrent.name} ${file.name}');
+        if (episodeTokens.isNotEmpty && !episodeTokens.any(haystack.contains)) {
+          continue;
+        }
+        final titleMatches = titleTokens.where(haystack.contains).length;
+        if (titleTokens.isNotEmpty && titleMatches < requiredTitleMatches) {
+          continue;
+        }
+        var score = titleMatches * 20;
+        if (episodeTokens.isNotEmpty) score += 100;
+        if (year != null && haystack.contains('$year')) score += 5;
+        if (file.size > 0) score += 1;
+        if (score > bestScore ||
+            score == bestScore && file.size > (best?.file.size ?? -1)) {
+          bestScore = score;
+          best = TorBoxFileSelection(torrent: torrent, file: file);
+        }
+      }
+    }
+    return best;
   }
 
   Future<Uri> requestDownloadLink({
@@ -267,4 +382,40 @@ class TorBoxClient {
     }
     return null;
   }
+
+  Set<String> _searchTokens(String value) => _normalized(value)
+      .split(' ')
+      .where(
+        (token) => token.length >= 3 && !_ignoredTitleTokens.contains(token),
+      )
+      .toSet();
+
+  Set<String> _episodeTokens(String? episodeCode) {
+    if (episodeCode == null) return const {};
+    final match = RegExp(
+      r's(\d{1,3})e(\d{1,4})',
+      caseSensitive: false,
+    ).firstMatch(episodeCode);
+    if (match == null) return {_normalized(episodeCode).replaceAll(' ', '')};
+    final season = int.parse(match.group(1)!);
+    final episode = int.parse(match.group(2)!);
+    return {
+      's${season.toString().padLeft(2, '0')}e${episode.toString().padLeft(2, '0')}',
+      '${season}x${episode.toString().padLeft(2, '0')}',
+    };
+  }
+
+  String _normalized(String value) =>
+      value.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), ' ').trim();
+
+  String _magnetHash(String magnet) {
+    final uri = Uri.tryParse(magnet);
+    final values = uri?.queryParametersAll['xt'];
+    final xt = values == null || values.isEmpty ? null : values.first;
+    if (xt == null) return '';
+    final hash = xt.split(':').last.trim().toLowerCase();
+    return RegExp(r'^[a-z0-9]{32,40}$').hasMatch(hash) ? hash : '';
+  }
 }
+
+const _ignoredTitleTokens = {'the', 'and', 'for', 'with', 'season', 'complete'};

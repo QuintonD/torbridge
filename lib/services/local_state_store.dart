@@ -91,6 +91,7 @@ class SharedPreferencesLocalStateStore implements LocalStateStore {
     'allowUnknownAudio': value.allowUnknownAudio,
     'maximumSizeBytes': value.maximumSizeBytes,
     'blockedReleaseTags': value.blockedReleaseTags.toList(),
+    'deleteWatchedAfterDays': value.deleteWatchedAfterDays,
   };
 
   DownloadPreferences _preferencesFromJson(Map<String, dynamic> json) {
@@ -138,6 +139,9 @@ class SharedPreferencesLocalStateStore implements LocalStateStore {
         json['blockedReleaseTags'],
         defaults.blockedReleaseTags.toList(),
       ).toSet(),
+      deleteWatchedAfterDays: json.containsKey('deleteWatchedAfterDays')
+          ? (json['deleteWatchedAfterDays'] as num?)?.toInt()
+          : defaults.deleteWatchedAfterDays,
     );
   }
 

@@ -42,6 +42,10 @@ class TorBridgeApp extends StatelessWidget {
           color: Color(0xFF17151F),
           elevation: 0,
           margin: EdgeInsets.zero,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.all(Radius.circular(18)),
+            side: BorderSide(color: Color(0xFF2A2736)),
+          ),
         ),
         inputDecorationTheme: InputDecorationTheme(
           filled: true,
@@ -67,6 +71,17 @@ class TorBridgeApp extends StatelessWidget {
               borderRadius: BorderRadius.circular(14),
             ),
           ),
+        ),
+        outlinedButtonTheme: OutlinedButtonThemeData(
+          style: OutlinedButton.styleFrom(
+            minimumSize: const Size(0, 48),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+            ),
+          ),
+        ),
+        textButtonTheme: TextButtonThemeData(
+          style: TextButton.styleFrom(minimumSize: const Size(0, 48)),
         ),
         chipTheme: ChipThemeData(
           side: BorderSide(color: scheme.outlineVariant),

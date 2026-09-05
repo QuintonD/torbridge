@@ -41,6 +41,8 @@ abstract class CredentialStore {
     required String refreshToken,
   });
 
+  Future<void> saveAll(StoredConnections connections);
+
   Future<void> clear();
 }
 
@@ -94,6 +96,20 @@ class PlatformCredentialStore implements CredentialStore {
       _writeOrDelete(_traktAccessToken, accessToken),
       _writeOrDelete(_traktRefreshToken, refreshToken),
     ]);
+  }
+
+  @override
+  Future<void> saveAll(StoredConnections connections) async {
+    await save(
+      aioManifestUrl: connections.aioManifestUrl ?? '',
+      torBoxToken: connections.torBoxToken ?? '',
+      traktClientId: connections.traktClientId ?? '',
+      traktClientSecret: connections.traktClientSecret ?? '',
+    );
+    await saveTraktTokens(
+      accessToken: connections.traktAccessToken ?? '',
+      refreshToken: connections.traktRefreshToken ?? '',
+    );
   }
 
   @override

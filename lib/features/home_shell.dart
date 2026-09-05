@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../app/app_state.dart';
 import 'discover/discover_screen.dart';
 import 'downloads/downloads_screen.dart';
+import 'diagnostics/diagnostics_screen.dart';
 import 'library/library_screen.dart';
 import 'settings/settings_screen.dart';
 
@@ -24,6 +25,10 @@ class HomeShell extends ConsumerWidget {
       label: 'Library',
     ),
     NavigationDestination(icon: Icon(Icons.tune_outlined), label: 'Settings'),
+    NavigationDestination(
+      icon: Icon(Icons.health_and_safety_outlined),
+      label: 'Diagnostics',
+    ),
   ];
 
   static const _screens = <Widget>[
@@ -31,6 +36,7 @@ class HomeShell extends ConsumerWidget {
     DownloadsScreen(),
     LibraryScreen(),
     SettingsScreen(),
+    DiagnosticsScreen(),
   ];
 
   @override
@@ -47,6 +53,13 @@ class HomeShell extends ConsumerWidget {
           child: IndexedStack(index: index, children: _screens),
         ),
         bottomNavigationBar: NavigationBar(
+          // Keep large accessibility text from breaking five labels into
+          // unreadable fragments. Destination semantics and tooltips remain.
+          labelBehavior:
+              MediaQuery.sizeOf(context).width < 400 &&
+                  MediaQuery.textScalerOf(context).scale(12) > 15
+              ? NavigationDestinationLabelBehavior.alwaysHide
+              : NavigationDestinationLabelBehavior.alwaysShow,
           selectedIndex: index,
           onDestinationSelected: controller.navigate,
           destinations: _destinations,

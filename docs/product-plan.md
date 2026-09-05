@@ -21,30 +21,43 @@ Delivered in v1:
 - secure credentials and persistent preferences/completed-download records;
 - unit, contract, responsive-widget, emulator, build, and runtime visual checks.
 
+## Delivered in v1.1
+
+- series metadata, season and episode navigation, artwork, canonical episode
+  stream IDs, and episode-aware fallback scrobbling;
+- a loopback-only Stremio addon and range server with exact-item deep links;
+- Android foreground serving and Download Manager restart reconciliation;
+- source/audio/subtitle tags, manual version replacement, retry/cancel/delete;
+- configurable delayed removal after watched-state synchronization from Trakt;
+- an in-app diagnostics screen for the complete handoff.
+
 ## Next slice
 
-1. Add series metadata, season/episode navigation, `tt…:season:episode` stream
-   IDs, and episode-specific Trakt payloads.
-2. Persist the Android Download Manager ID at enqueue time and reconcile active
-   and completed jobs during app startup.
-3. Add per-profile rules so a partner can have independent languages, quality,
+1. Add optional ongoing encrypted synchronization between paired devices,
+   including preference revisions and device-owned download summaries.
+2. Add per-profile rules so a partner can have independent languages, quality,
    Trakt authorization, and watched state on the same installation.
-4. Add manual alternative download as an escape hatch while retaining the
-   recommended one-click default.
-5. Replace the Android development signing key with a private release key and
+3. Replace the Android development signing key with a private release key and
    add update metadata before wider distribution.
+4. Add opt-in automatic next-episode queues with Wi-Fi, charging, and free-space
+   rules.
+
+## Delivered in v1.2
+
+- a five-minute, one-time desktop setup QR with no credentials embedded;
+- AES-256-GCM authenticated transfer over the local network;
+- Android QR scanning, matching verification code, import preview, and explicit
+  replacement confirmation;
+- transfer of TorBox, AIOStreams, Trakt, and download preferences while keeping
+  media files, file paths, downloads, and watched records device-local.
 
 ## Later options
 
-- Stremio deep links or a small local addon/bridge can expose “send to
-  TorBridge” if the upstream clients offer a stable handoff point. This should
-  remain an adapter, not a hard dependency.
 - Background completion notifications can offer **Play now** and **Mark
   watched** actions.
-- A transparent diagnostics view can show raw AIOStreams fields and the score
-  calculation without exposing tokens.
+- A secure LAN mode can expose Windows downloads to a Stremio device such as a
+  Shield; it needs pairing and HTTPS rather than reusing the loopback bridge.
 
 Forking Stremio should only be reconsidered if native integration becomes a
 core product requirement and the long-term cost of tracking its desktop,
 Android, and player internals is accepted.
-

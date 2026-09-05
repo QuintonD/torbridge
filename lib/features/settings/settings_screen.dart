@@ -1,13 +1,17 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../app/app_state.dart';
 import '../../domain/media_models.dart';
 import '../../integrations/trakt_client.dart';
 import '../../services/credential_store.dart';
+import '../../services/setup_transfer_service.dart';
 import '../common/page_header.dart';
 
 class SettingsScreen extends ConsumerWidget {
@@ -38,6 +42,7 @@ class SettingsScreen extends ConsumerWidget {
       onChanged: controller.updatePreferences,
     );
     const connectionCard = _ConnectionCard();
+    const deviceTransferCard = _DeviceTransferCard();
 
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(24, 24, 24, 32),
@@ -56,17 +61,402 @@ class SettingsScreen extends ConsumerWidget {
               children: [
                 Expanded(flex: 6, child: preferenceCard),
                 const SizedBox(width: 16),
-                const Expanded(flex: 4, child: connectionCard),
+                const Expanded(
+                  flex: 4,
+                  child: Column(
+                    children: [
+                      connectionCard,
+                      SizedBox(height: 16),
+                      deviceTransferCard,
+                    ],
+                  ),
+                ),
               ],
             )
           else ...[
             preferenceCard,
             const SizedBox(height: 16),
             connectionCard,
+            const SizedBox(height: 16),
+            deviceTransferCard,
           ],
         ],
       ),
     );
+  }
+}
+
+class _DeviceTransferCard extends ConsumerWidget {
+  const _DeviceTransferCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final state = ref.watch(torBridgeControllerProvider);
+    final isDesktop = defaultTargetPlatform == TargetPlatform.windows;
+    final isAndroid = defaultTargetPlatform == TargetPlatform.android;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              'Transfer setup',
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
+            const SizedBox(height: 6),
+            Text(
+              isDesktop
+                  ? 'Move connections and download rules to TorBridge Mobile with one encrypted QR transfer.'
+                  : 'Scan a QR shown by TorBridge Desktop to import its connections and download rules.',
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 16),
+            if (isDesktop)
+              FilledButton.tonalIcon(
+                key: const Key('show-setup-qr'),
+                onPressed: () => showDialog<void>(
+                  context: context,
+                  barrierDismissible: false,
+                  builder: (_) => _SetupQrDialog(
+                    bundle: SetupTransferBundle(
+                      connections: state.connections,
+                      preferences: state.preferences,
+                    ),
+                  ),
+                ),
+                icon: const Icon(Icons.qr_code_2),
+                label: const Text('Show setup QR'),
+              )
+            else if (isAndroid)
+              FilledButton.tonalIcon(
+                key: const Key('scan-setup-qr'),
+                onPressed: () => showDialog<void>(
+                  context: context,
+                  barrierDismissible: false,
+                  builder: (_) => const _SetupScannerDialog(),
+                ),
+                icon: const Icon(Icons.qr_code_scanner),
+                label: const Text('Scan desktop QR'),
+              )
+            else
+              const Text('QR import is available on Android.'),
+            const SizedBox(height: 10),
+            Text(
+              'Single-use • expires after 5 minutes • same network required',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SetupQrDialog extends ConsumerStatefulWidget {
+  const _SetupQrDialog({required this.bundle});
+
+  final SetupTransferBundle bundle;
+
+  @override
+  ConsumerState<_SetupQrDialog> createState() => _SetupQrDialogState();
+}
+
+class _SetupQrDialogState extends ConsumerState<_SetupQrDialog> {
+  late final Future<SetupTransferOffer> _offer;
+  late final SetupTransferService _transferService;
+
+  @override
+  void initState() {
+    super.initState();
+    _transferService = ref.read(setupTransferServiceProvider);
+    _offer = _transferService.startOffer(widget.bundle);
+  }
+
+  @override
+  void dispose() {
+    unawaited(_transferService.stopOffer());
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Scan with TorBridge Mobile'),
+      content: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 420),
+        child: FutureBuilder<SetupTransferOffer>(
+          future: _offer,
+          builder: (context, snapshot) {
+            if (snapshot.hasError) {
+              return Text(
+                '${snapshot.error}',
+                key: const Key('setup-qr-error'),
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              );
+            }
+            final offer = snapshot.data;
+            if (offer == null) {
+              return const SizedBox(
+                height: 280,
+                child: Center(child: CircularProgressIndicator()),
+              );
+            }
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Center(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: SizedBox.square(
+                        dimension: 250,
+                        child: QrImageView(
+                          key: const Key('setup-qr-code'),
+                          data: offer.uri.toString(),
+                          backgroundColor: Colors.white,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  'Verification code',
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.labelLarge,
+                ),
+                Text(
+                  offer.verificationCode,
+                  key: const Key('setup-verification-code'),
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.headlineMedium,
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  'Includes ${offer.includedItems.join(', ')}. Keep this window open and both devices on the same network.',
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'No credentials are stored in the QR. The encrypted transfer can be claimed once and expires after 5 minutes.',
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'If Windows asks, allow TorBridge on Private networks only.',
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Close'),
+        ),
+      ],
+    );
+  }
+}
+
+class _SetupScannerDialog extends ConsumerStatefulWidget {
+  const _SetupScannerDialog();
+
+  @override
+  ConsumerState<_SetupScannerDialog> createState() =>
+      _SetupScannerDialogState();
+}
+
+class _SetupScannerDialogState extends ConsumerState<_SetupScannerDialog> {
+  final MobileScannerController _scanner = MobileScannerController(
+    formats: const [BarcodeFormat.qrCode],
+    detectionSpeed: DetectionSpeed.noDuplicates,
+  );
+  ReceivedSetupTransfer? _received;
+  bool _processing = false;
+  bool _importing = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    unawaited(_scanner.dispose());
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final received = _received;
+    return AlertDialog(
+      title: Text(
+        received == null ? 'Scan desktop QR' : 'Confirm setup import',
+      ),
+      content: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 440),
+        child: received == null
+            ? _scannerContent(context)
+            : _preview(context, received),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _importing ? null : () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        if (received != null)
+          FilledButton(
+            key: const Key('confirm-setup-import'),
+            onPressed: _importing ? null : _import,
+            child: Text(_importing ? 'Importing…' : 'Import setup'),
+          ),
+      ],
+    );
+  }
+
+  Widget _scannerContent(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        ClipRRect(
+          borderRadius: BorderRadius.circular(16),
+          child: SizedBox(
+            height: 320,
+            child: MobileScanner(
+              key: const Key('setup-qr-scanner'),
+              controller: _scanner,
+              onDetect: _onDetect,
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Text(
+          _processing
+              ? 'Connecting securely to the desktop…'
+              : 'Point the camera at the QR code shown in TorBridge Desktop.',
+          textAlign: TextAlign.center,
+        ),
+        if (_error != null) ...[
+          const SizedBox(height: 8),
+          Text(
+            _error!,
+            key: const Key('setup-scan-error'),
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Theme.of(context).colorScheme.error),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _preview(BuildContext context, ReceivedSetupTransfer received) {
+    final bundle = received.bundle;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Icon(
+          Icons.verified_user_outlined,
+          size: 48,
+          color: Theme.of(context).colorScheme.primary,
+        ),
+        const SizedBox(height: 8),
+        Text(
+          received.verificationCode,
+          key: const Key('received-verification-code'),
+          textAlign: TextAlign.center,
+          style: Theme.of(context).textTheme.headlineMedium,
+        ),
+        const SizedBox(height: 6),
+        const Text(
+          'Confirm this matches the code on the desktop.',
+          textAlign: TextAlign.center,
+        ),
+        const SizedBox(height: 18),
+        for (final item in bundle.includedItems)
+          ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.check_circle_outline),
+            title: Text(item),
+          ),
+        const SizedBox(height: 6),
+        Text(
+          'Existing connections and download rules on this device will be replaced. Downloads and local files are not transferred.',
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+        if (_error != null) ...[
+          const SizedBox(height: 8),
+          Text(
+            _error!,
+            style: TextStyle(color: Theme.of(context).colorScheme.error),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Future<void> _onDetect(BarcodeCapture capture) async {
+    if (_processing || _received != null) return;
+    String? raw;
+    for (final barcode in capture.barcodes) {
+      if (barcode.rawValue != null) {
+        raw = barcode.rawValue;
+        break;
+      }
+    }
+    if (raw == null) return;
+    setState(() {
+      _processing = true;
+      _error = null;
+    });
+    await _scanner.stop();
+    try {
+      final received = await ref.read(setupTransferServiceProvider).redeem(raw);
+      if (!mounted) return;
+      setState(() {
+        _received = received;
+        _processing = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _error = '$error';
+        _processing = false;
+      });
+      await _scanner.start();
+    }
+  }
+
+  Future<void> _import() async {
+    final received = _received;
+    if (received == null) return;
+    setState(() {
+      _importing = true;
+      _error = null;
+    });
+    final error = await ref
+        .read(torBridgeControllerProvider.notifier)
+        .importSetupTransfer(received.bundle);
+    if (!mounted) return;
+    if (error == null) {
+      Navigator.pop(context);
+    } else {
+      setState(() {
+        _importing = false;
+        _error = error;
+      });
+    }
   }
 }
 
@@ -233,6 +623,28 @@ class _PreferenceCard extends StatelessWidget {
               onChanged: (value) =>
                   onChanged(preferences.copyWith(preferHdr: value)),
             ),
+            const SizedBox(height: 8),
+            DropdownButtonFormField<int>(
+              key: const Key('watched-cleanup-delay'),
+              initialValue: preferences.deleteWatchedAfterDays ?? -1,
+              decoration: const InputDecoration(
+                labelText: 'Remove watched downloads',
+                prefixIcon: Icon(Icons.auto_delete_outlined),
+                helperText: 'The delay starts when TorBridge learns the watched state from Trakt.',
+              ),
+              items: const [
+                DropdownMenuItem(value: -1, child: Text('Never')),
+                DropdownMenuItem(value: 0, child: Text('At next sync')),
+                DropdownMenuItem(value: 1, child: Text('After 1 day')),
+                DropdownMenuItem(value: 7, child: Text('After 7 days')),
+                DropdownMenuItem(value: 30, child: Text('After 30 days')),
+              ],
+              onChanged: (value) => onChanged(
+                preferences.copyWith(
+                  deleteWatchedAfterDays: value == -1 ? null : value,
+                ),
+              ),
+            ),
           ],
         ),
       ),
@@ -324,6 +736,18 @@ class _ConnectionCard extends ConsumerWidget {
                   : 'Local watched state only',
               connected: connections.hasTraktSession,
             ),
+            const Divider(height: 26),
+            _ServiceStatus(
+              icon: Icons.ondemand_video_outlined,
+              name: 'Stremio bridge',
+              status: switch (state.bridgePhase) {
+                BridgePhase.ready => 'Local addon ready',
+                BridgePhase.starting => 'Starting local addon…',
+                BridgePhase.error => 'Local addon needs attention',
+                BridgePhase.stopped => 'Starts when connected or first used',
+              },
+              connected: state.bridgePhase == BridgePhase.ready,
+            ),
             const SizedBox(height: 18),
             FilledButton.tonalIcon(
               key: const Key('configure-services'),
@@ -351,6 +775,30 @@ class _ConnectionCard extends ConsumerWidget {
                 label: const Text('Authorize Trakt'),
               ),
             ],
+            if (connections.hasTraktSession) ...[
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                key: const Key('sync-trakt-watched'),
+                onPressed: () => unawaited(
+                  ref
+                      .read(torBridgeControllerProvider.notifier)
+                      .syncTraktWatched(),
+                ),
+                icon: const Icon(Icons.sync),
+                label: const Text('Refresh watched state'),
+              ),
+            ],
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              key: const Key('install-stremio-addon-settings'),
+              onPressed: () => unawaited(
+                ref
+                    .read(torBridgeControllerProvider.notifier)
+                    .installStremioAddon(),
+              ),
+              icon: const Icon(Icons.extension_outlined),
+              label: const Text('Copy addon URL and open Stremio'),
+            ),
             if (connections.hasAioStreams && connections.hasTorBox) ...[
               const SizedBox(height: 8),
               SwitchListTile(

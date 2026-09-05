@@ -17,9 +17,8 @@ try {
     $dist = Join-Path $projectRoot 'dist'
     New-Item -ItemType Directory -Path $dist -Force | Out-Null
     Compress-Archive -Path 'build\windows\x64\runner\Release\*' `
-        -DestinationPath (Join-Path $dist 'TorBridge-Windows-x64-1.0.0.zip') `
+        -DestinationPath (Join-Path $dist 'TorBridge-Windows-x64-1.2.0.zip') `
         -CompressionLevel Optimal -Force
 } finally {
     Pop-Location
 }
-

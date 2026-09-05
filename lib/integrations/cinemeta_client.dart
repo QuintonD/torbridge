@@ -18,6 +18,15 @@ class CinemetaClient {
     return [...results[0], ...results[1]];
   }
 
+  Future<CatalogTitle> getDetails(CatalogTitle preview) async {
+    final response = await _dio.get<Map<String, dynamic>>(
+      '/meta/${preview.type}/${Uri.encodeComponent(preview.id)}.json',
+    );
+    final meta = response.data?['meta'];
+    if (meta is! Map) return preview;
+    return _parse(Map<String, dynamic>.from(meta), preview.type);
+  }
+
   Future<List<CatalogTitle>> _searchType(String type, String query) async {
     final encodedQuery = Uri.encodeComponent(query);
     final response = await _dio.get<Map<String, dynamic>>(
@@ -54,8 +63,44 @@ class CinemetaClient {
       color: _colorFrom(id),
       posterUrl: Uri.tryParse('${meta['poster'] ?? ''}'),
       backgroundUrl: Uri.tryParse('${meta['background'] ?? ''}'),
+      videos: _parseVideos(meta['videos']),
     );
   }
+
+  List<CatalogVideo> _parseVideos(Object? value) {
+    if (value is! List) return const [];
+    final videos = <CatalogVideo>[];
+    for (final raw in value.whereType<Map>()) {
+      final video = Map<String, dynamic>.from(raw);
+      final id = '${video['id'] ?? ''}'.trim();
+      final season = _asInt(video['season']);
+      final episode = _asInt(video['episode']);
+      if (id.isEmpty || season == null || episode == null) continue;
+      videos.add(
+        CatalogVideo(
+          id: id,
+          title: '${video['title'] ?? 'Episode $episode'}',
+          season: season,
+          episode: episode,
+          released: DateTime.tryParse('${video['released'] ?? ''}'),
+          thumbnailUrl: Uri.tryParse('${video['thumbnail'] ?? ''}'),
+          overview: '${video['overview'] ?? ''}',
+        ),
+      );
+    }
+    videos.sort((a, b) {
+      final season = a.season.compareTo(b.season);
+      return season != 0 ? season : a.episode.compareTo(b.episode);
+    });
+    return List.unmodifiable(videos);
+  }
+
+  int? _asInt(Object? value) => switch (value) {
+    int number => number,
+    num number => number.toInt(),
+    String text => int.tryParse(text),
+    _ => null,
+  };
 
   int _colorFrom(String value) {
     var hash = 0;

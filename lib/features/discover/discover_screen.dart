@@ -7,6 +7,7 @@ import '../../app/app_state.dart';
 import '../../domain/catalog_title.dart';
 import '../../domain/media_models.dart';
 import '../common/page_header.dart';
+import '../common/artwork_image.dart';
 import '../player/player_screen.dart';
 
 class DiscoverScreen extends ConsumerWidget {
@@ -15,7 +16,8 @@ class DiscoverScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final state = ref.watch(torBridgeControllerProvider);
-    final best = state.recommendation.best;
+    final recommendation = state.recommendation;
+    final best = recommendation.best;
     final wide = MediaQuery.sizeOf(context).width >= 980;
 
     return CustomScrollView(
@@ -33,19 +35,7 @@ class DiscoverScreen extends ConsumerWidget {
         ),
         SliverPadding(
           padding: const EdgeInsets.symmetric(horizontal: 24),
-          sliver: SliverToBoxAdapter(
-            child: TextField(
-              key: const Key('catalog-search'),
-              decoration: const InputDecoration(
-                hintText: 'Search movies and series',
-                prefixIcon: Icon(Icons.search),
-                suffixIcon: Icon(Icons.auto_awesome_outlined),
-              ),
-              onSubmitted: (query) => ref
-                  .read(torBridgeControllerProvider.notifier)
-                  .searchCatalog(query),
-            ),
-          ),
+          sliver: SliverToBoxAdapter(child: const _CatalogSearch()),
         ),
         if (state.busy)
           const SliverPadding(
@@ -74,7 +64,7 @@ class DiscoverScreen extends ConsumerWidget {
         ),
         SliverToBoxAdapter(
           child: SizedBox(
-            height: 172,
+            height: 212,
             child: ListView.separated(
               padding: const EdgeInsets.symmetric(horizontal: 24),
               scrollDirection: Axis.horizontal,
@@ -109,7 +99,9 @@ class DiscoverScreen extends ConsumerWidget {
                         flex: 5,
                         child: _RecommendationCard(
                           best: best,
-                          alternatives: state.recommendation.alternatives,
+                          alternatives: recommendation.alternatives,
+                          rejected: recommendation.rejected,
+                          loading: state.busy,
                         ),
                       ),
                     ],
@@ -120,7 +112,9 @@ class DiscoverScreen extends ConsumerWidget {
                       const SizedBox(height: 16),
                       _RecommendationCard(
                         best: best,
-                        alternatives: state.recommendation.alternatives,
+                        alternatives: recommendation.alternatives,
+                        rejected: recommendation.rejected,
+                        loading: state.busy,
                       ),
                     ],
                   ),
@@ -129,6 +123,61 @@ class DiscoverScreen extends ConsumerWidget {
       ],
     );
   }
+}
+
+class _CatalogSearch extends ConsumerStatefulWidget {
+  const _CatalogSearch();
+  @override
+  ConsumerState<_CatalogSearch> createState() => _CatalogSearchState();
+}
+
+class _CatalogSearchState extends ConsumerState<_CatalogSearch> {
+  final _text = TextEditingController();
+  @override
+  void dispose() {
+    _text.dispose();
+    super.dispose();
+  }
+
+  void _search() {
+    FocusScope.of(context).unfocus();
+    unawaited(
+      ref.read(torBridgeControllerProvider.notifier).searchCatalog(_text.text),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => TextField(
+    key: const Key('catalog-search'),
+    controller: _text,
+    textInputAction: TextInputAction.search,
+    onChanged: (_) => setState(() {}),
+    onSubmitted: (_) => _search(),
+    decoration: InputDecoration(
+      hintText: 'Search movies and series',
+      prefixIcon: const Icon(Icons.search),
+      suffixIcon: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (_text.text.isNotEmpty)
+            IconButton(
+              tooltip: 'Clear search',
+              icon: const Icon(Icons.close),
+              onPressed: () {
+                _text.clear();
+                setState(() {});
+                _search();
+              },
+            ),
+          IconButton(
+            tooltip: 'Search titles',
+            icon: const Icon(Icons.arrow_forward),
+            onPressed: _search,
+          ),
+        ],
+      ),
+    ),
+  );
 }
 
 class _ConnectionBadge extends StatelessWidget {
@@ -176,14 +225,10 @@ class _TitleCard extends StatelessWidget {
         onTap: onTap,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 180),
-          width: 238,
-          padding: const EdgeInsets.all(16),
+          width: 132,
+          clipBehavior: Clip.antiAlias,
           decoration: BoxDecoration(
-            gradient: LinearGradient(
-              colors: [color, Color.lerp(color, Colors.black, 0.62)!],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-            ),
+            color: color,
             borderRadius: BorderRadius.circular(16),
             border: Border.all(
               color: selected
@@ -192,28 +237,45 @@ class _TitleCard extends StatelessWidget {
               width: selected ? 2 : 1,
             ),
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          child: Stack(
+            fit: StackFit.expand,
             children: [
-              const Spacer(),
-              Text(
-                title.genre.toUpperCase(),
-                style: Theme.of(context).textTheme.labelSmall
-                    ?.copyWith(letterSpacing: 1.1, color: Colors.white70),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                title.name,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                  color: Colors.white,
-                  fontWeight: FontWeight.w700,
+              ArtworkImage(url: title.posterUrl, fallbackColor: color),
+              const DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [Colors.transparent, Colors.black87],
+                    stops: [0.42, 1],
+                  ),
                 ),
               ),
-              Text(
-                '${title.year}',
-                style: const TextStyle(color: Colors.white70),
+              Positioned(
+                left: 10,
+                right: 10,
+                bottom: 9,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title.name,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    Text(
+                      '${title.year} · ${title.type == 'series' ? 'Series' : 'Movie'}',
+                      style: const TextStyle(
+                        color: Colors.white70,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ],
           ),
@@ -230,57 +292,350 @@ class _TitleDetails extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final watched = ref.watch(
-      torBridgeControllerProvider.select(
-        (state) => state.watchedTitleIds.contains(title.id),
-      ),
-    );
+    final state = ref.watch(torBridgeControllerProvider);
+    final video = state.selectedVideo;
+    final watched = state.watchedTitleIds.contains(video?.id ?? title.id);
     return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(title.name, style: Theme.of(context).textTheme.headlineSmall),
-            const SizedBox(height: 6),
-            Text('${title.year}  •  ${title.genre}'),
-            const SizedBox(height: 14),
-            Text(
-              title.summary,
-              style: TextStyle(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-                height: 1.45,
-              ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SizedBox(
+            height: 150,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                ArtworkImage(
+                  url: title.backgroundUrl ?? title.posterUrl,
+                  fallbackColor: Color(title.color),
+                ),
+                const DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [Colors.transparent, Color(0xFF17151F)],
+                    ),
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(height: 18),
-            OutlinedButton.icon(
-              key: const Key('toggle-watched'),
-              onPressed: () => ref
-                  .read(torBridgeControllerProvider.notifier)
-                  .toggleWatched(title.id),
-              icon: Icon(
-                watched ? Icons.check_circle : Icons.check_circle_outline,
-              ),
-              label: Text(watched ? 'Watched' : 'Mark watched'),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title.name,
+                  style: Theme.of(context).textTheme.headlineSmall,
+                ),
+                const SizedBox(height: 6),
+                Text('${title.year}  •  ${title.genre}'),
+                const SizedBox(height: 14),
+                Text(
+                  video?.overview.isNotEmpty == true
+                      ? video!.overview
+                      : title.summary,
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    height: 1.45,
+                  ),
+                ),
+                if (title.isSeries && title.videos.isNotEmpty) ...[
+                  const SizedBox(height: 18),
+                  _EpisodePicker(title: title, selected: video),
+                ],
+                const SizedBox(height: 18),
+                OutlinedButton.icon(
+                  key: const Key('toggle-watched'),
+                  onPressed: title.isSeries && video == null
+                      ? null
+                      : () => ref
+                            .read(torBridgeControllerProvider.notifier)
+                            .toggleWatched(video?.id ?? title.id),
+                  icon: Icon(
+                    watched ? Icons.check_circle : Icons.check_circle_outline,
+                  ),
+                  label: Text(
+                    watched
+                        ? video == null
+                              ? 'Watched'
+                              : '${video.code} watched'
+                        : 'Mark ${video?.code ?? 'movie'} watched',
+                  ),
+                ),
+              ],
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
 }
 
+class _EpisodePicker extends ConsumerWidget {
+  const _EpisodePicker({required this.title, required this.selected});
+
+  final CatalogTitle title;
+  final CatalogVideo? selected;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final seasons = title.videos.map((video) => video.season).toSet().toList()
+      ..sort();
+    final selectedSeason = selected?.season ?? seasons.first;
+    final episodes = title.videos
+        .where((video) => video.season == selectedSeason)
+        .toList();
+    final watched = ref.watch(
+      torBridgeControllerProvider.select((state) => state.watchedTitleIds),
+    );
+    final alreadyAdded = ref.watch(
+      torBridgeControllerProvider.select(
+        (state) => state.downloads
+            .where((job) => job.status != DownloadStatus.failed)
+            .map((job) => job.videoId)
+            .toSet(),
+      ),
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                'Episodes',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+            ),
+            DropdownButton<int>(
+              key: const Key('season-selector'),
+              value: selectedSeason,
+              items: [
+                for (final season in seasons)
+                  DropdownMenuItem(
+                    value: season,
+                    child: Text('Season $season'),
+                  ),
+              ],
+              onChanged: (season) {
+                if (season == null) return;
+                final first = title.videos.firstWhere(
+                  (video) => video.season == season,
+                );
+                ref
+                    .read(torBridgeControllerProvider.notifier)
+                    .selectVideo(first);
+              },
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 250),
+          child: ListView.separated(
+            shrinkWrap: true,
+            itemCount: episodes.length,
+            separatorBuilder: (_, _) => const Divider(height: 1),
+            itemBuilder: (context, index) {
+              final episode = episodes[index];
+              final active = episode.id == selected?.id;
+              return ListTile(
+                key: Key('episode-${episode.id}'),
+                selected: active,
+                contentPadding: EdgeInsets.zero,
+                leading: SizedBox(
+                  width: 68,
+                  height: 42,
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(7),
+                    child: ArtworkImage(
+                      url: episode.thumbnailUrl,
+                      fallbackColor: Color(title.color),
+                      icon: Icons.tv,
+                    ),
+                  ),
+                ),
+                title: Text('${episode.code} · ${episode.title}'),
+                subtitle: episode.released == null
+                    ? null
+                    : Text(
+                        '${episode.released!.year}-${episode.released!.month.toString().padLeft(2, '0')}-${episode.released!.day.toString().padLeft(2, '0')}',
+                      ),
+                trailing: watched.contains(episode.id)
+                    ? const Icon(Icons.check_circle, color: Color(0xFF75D6A4))
+                    : null,
+                onTap: () => ref
+                    .read(torBridgeControllerProvider.notifier)
+                    .selectVideo(episode),
+              );
+            },
+          ),
+        ),
+        const SizedBox(height: 12),
+        OutlinedButton.icon(
+          key: Key('download-season-$selectedSeason'),
+          onPressed: () => _chooseEpisodeDownloads(
+            context,
+            ref,
+            season: selectedSeason,
+            episodes: episodes,
+            alreadyAdded: alreadyAdded,
+          ),
+          icon: const Icon(Icons.download_for_offline_outlined),
+          label: const Text('Download episodes'),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _chooseEpisodeDownloads(
+    BuildContext context,
+    WidgetRef ref, {
+    required int season,
+    required List<CatalogVideo> episodes,
+    required Set<String> alreadyAdded,
+  }) async {
+    final selected = await showDialog<List<CatalogVideo>>(
+      context: context,
+      builder: (dialogContext) {
+        final selectedIds = <String>{};
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            final available = episodes
+                .where((episode) => !alreadyAdded.contains(episode.id))
+                .toList(growable: false);
+            return AlertDialog(
+              title: Text('Download Season $season'),
+              content: SizedBox(
+                width: 520,
+                height: (episodes.length * 64 + 72).clamp(180, 520).toDouble(),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Wrap(
+                      alignment: WrapAlignment.spaceBetween,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        TextButton(
+                          key: const Key('select-all-episodes'),
+                          onPressed: available.isEmpty
+                              ? null
+                              : () => setDialogState(() {
+                                  selectedIds
+                                    ..clear()
+                                    ..addAll(available.map((item) => item.id));
+                                }),
+                          child: const Text('Select all'),
+                        ),
+                        TextButton(
+                          onPressed: selectedIds.isEmpty
+                              ? null
+                              : () => setDialogState(selectedIds.clear),
+                          child: const Text('Clear'),
+                        ),
+                        Text('${selectedIds.length} selected'),
+                      ],
+                    ),
+                    const Divider(height: 1),
+                    Flexible(
+                      child: ListView.builder(
+                        shrinkWrap: true,
+                        itemCount: episodes.length,
+                        itemBuilder: (context, index) {
+                          final episode = episodes[index];
+                          final unavailable = alreadyAdded.contains(episode.id);
+                          return CheckboxListTile(
+                            key: Key('bulk-episode-${episode.id}'),
+                            value: selectedIds.contains(episode.id),
+                            dense: true,
+                            controlAffinity: ListTileControlAffinity.leading,
+                            title: Text('${episode.code} · ${episode.title}'),
+                            subtitle: unavailable
+                                ? const Text('Already downloaded or queued')
+                                : null,
+                            onChanged: unavailable
+                                ? null
+                                : (checked) => setDialogState(() {
+                                    if (checked == true) {
+                                      selectedIds.add(episode.id);
+                                    } else {
+                                      selectedIds.remove(episode.id);
+                                    }
+                                  }),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton.icon(
+                  key: const Key('queue-selected-episodes'),
+                  onPressed: selectedIds.isEmpty
+                      ? null
+                      : () => Navigator.pop(
+                          dialogContext,
+                          episodes
+                              .where(
+                                (episode) => selectedIds.contains(episode.id),
+                              )
+                              .toList(growable: false),
+                        ),
+                  icon: const Icon(Icons.download_rounded),
+                  label: Text(
+                    selectedIds.length == 1
+                        ? 'Download episode'
+                        : 'Download ${selectedIds.length} episodes',
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    if (selected == null || selected.isEmpty || !context.mounted) return;
+    final result = await ref
+        .read(torBridgeControllerProvider.notifier)
+        .downloadEpisodes(title, selected);
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(result.message)));
+    if (result.queued > 0) {
+      ref.read(torBridgeControllerProvider.notifier).navigate(1);
+    }
+  }
+}
+
 class _RecommendationCard extends ConsumerWidget {
-  const _RecommendationCard({required this.best, required this.alternatives});
+  const _RecommendationCard({
+    required this.best,
+    required this.alternatives,
+    required this.rejected,
+    required this.loading,
+  });
 
   final RankedCandidate? best;
   final List<RankedCandidate> alternatives;
+  final List<RankedCandidate> rejected;
+  final bool loading;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final candidate = best?.candidate;
     final mediaTitle = ref.watch(
       torBridgeControllerProvider.select((state) => state.selectedTitle),
+    );
+    final mediaVideo = ref.watch(
+      torBridgeControllerProvider.select((state) => state.selectedVideo),
     );
     return Card(
       key: const Key('recommendation-card'),
@@ -311,7 +666,7 @@ class _RecommendationCard extends ConsumerWidget {
             ),
             const SizedBox(height: 16),
             if (candidate == null)
-              const Text('No source satisfies your current rules.')
+              _NoEligibleSources(rejected: rejected, loading: loading)
             else ...[
               Text(
                 candidate.displayName,
@@ -334,6 +689,18 @@ class _RecommendationCard extends ConsumerWidget {
                     label: candidate.cacheStatus.label,
                   ),
                   _FactChip(icon: Icons.sd_storage, label: candidate.sizeLabel),
+                  _FactChip(
+                    icon: Icons.volume_up_outlined,
+                    label: candidate.audioLanguages.isEmpty
+                        ? 'Audio unknown'
+                        : 'Audio: ${candidate.audioLanguages.join(', ')}',
+                  ),
+                  _FactChip(
+                    icon: Icons.subtitles_outlined,
+                    label: candidate.subtitleLanguages.isEmpty
+                        ? 'No subtitles listed'
+                        : 'Subs: ${candidate.subtitleLanguages.join(', ')}',
+                  ),
                 ],
               ),
               const SizedBox(height: 14),
@@ -375,6 +742,7 @@ class _RecommendationCard extends ConsumerWidget {
                             title: candidate.displayName,
                             source: candidate.streamUrl.toString(),
                             mediaTitle: mediaTitle,
+                            mediaVideo: mediaVideo,
                           ),
                         ),
                       ),
@@ -397,7 +765,15 @@ class _RecommendationCard extends ConsumerWidget {
                           '${alternative.candidate.codec.label} • '
                           '${alternative.candidate.sizeLabel}',
                         ),
-                        trailing: Text('${alternative.score}'),
+                        trailing: IconButton(
+                          tooltip: 'Download this version',
+                          onPressed: () => unawaited(
+                            ref
+                                .read(torBridgeControllerProvider.notifier)
+                                .downloadCandidate(alternative.candidate),
+                          ),
+                          icon: const Icon(Icons.download_outlined),
+                        ),
                       ),
                   ],
                 ),
@@ -406,6 +782,73 @@ class _RecommendationCard extends ConsumerWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _NoEligibleSources extends ConsumerWidget {
+  const _NoEligibleSources({required this.rejected, required this.loading});
+
+  final List<RankedCandidate> rejected;
+  final bool loading;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    if (loading) return const Text('Searching for sources…');
+    if (rejected.isEmpty) {
+      return const Text('AIOStreams returned no sources for this selection.');
+    }
+
+    final counts = <String, int>{};
+    for (final ranked in rejected) {
+      for (final reason in ranked.rejections) {
+        counts.update(reason, (count) => count + 1, ifAbsent: () => 1);
+      }
+    }
+    final summary = counts.entries.toList()
+      ..sort((a, b) {
+        final byCount = b.value.compareTo(a.value);
+        return byCount != 0 ? byCount : a.key.compareTo(b.key);
+      });
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          '${rejected.length} ${rejected.length == 1 ? 'source was' : 'sources were'} found, but rejected by your rules.',
+        ),
+        const SizedBox(height: 10),
+        for (final entry in summary.take(5))
+          Padding(
+            padding: const EdgeInsets.only(bottom: 5),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(
+                  Icons.block_outlined,
+                  size: 17,
+                  color: Theme.of(context).colorScheme.error,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    entry.value == 1
+                        ? entry.key
+                        : '${entry.key} (${entry.value} sources)',
+                  ),
+                ),
+              ],
+            ),
+          ),
+        const SizedBox(height: 10),
+        OutlinedButton.icon(
+          key: const Key('review-download-rules'),
+          onPressed: () =>
+              ref.read(torBridgeControllerProvider.notifier).navigate(3),
+          icon: const Icon(Icons.tune),
+          label: const Text('Review download rules'),
+        ),
+      ],
     );
   }
 }

@@ -15,6 +15,7 @@ void main() {
         preferredResolution: VideoResolution.ultraHd2160,
         maximumSizeBytes: 30000000000,
         preferHdr: true,
+        deleteWatchedAfterDays: 7,
       );
 
       await store.savePreferences(preferences);
@@ -31,6 +32,7 @@ void main() {
       );
       expect(restored.preferences.maximumSizeBytes, 30000000000);
       expect(restored.preferences.preferHdr, isTrue);
+      expect(restored.preferences.deleteWatchedAfterDays, 7);
       expect(restored.watchedTitleIds, {'tt1254207'});
       expect(restored.downloadRecords.single['id'], 'source-1');
     },
