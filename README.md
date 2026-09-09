@@ -10,7 +10,7 @@ uses your configured AIOStreams manifest and TorBox account; Trakt is optional.
 
 ## Installable builds
 
-- `dist/TorBridge-Android-1.2.7.apk` — sideloadable Android APK (Android 7+
+- `dist/TorBridge-Android-1.2.8.apk` — sideloadable Android APK (Android 7+
   by Flutter's current minimum; tested on API 30, 34, and 36).
 - `dist/TorBridge-Windows-x64-1.2.7.zip` — extract the complete archive and run
   `torbridge.exe`. Do not move the executable away from its adjacent DLL and
@@ -23,6 +23,13 @@ The 1.2.7 UI update adds visible player choices, download status filters,
 responsive headers, and clearer search controls. See the [UI pass](docs/ui-pass/README.md)
 for rendered previews and the imagegen design reference. Install the Android APK
 over the existing app to retain app data; do not uninstall first.
+
+Android 1.2.8 checks saved downloads before playback and recovers readable
+locations through Android's Download Manager. Unreadable files appear under
+**Downloads → Needs attention**, with **Retry download**. Checks retain the
+original record and do not delete files or start transfers. See the
+[download recovery notes](docs/android-download-recovery.md) for validation
+and the remaining Pixel 7a investigation.
 
 ## First run
 

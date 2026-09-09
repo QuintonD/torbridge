@@ -6,15 +6,17 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.res.AssetFileDescriptor
+import android.net.Uri
 import android.os.Build
 import android.os.IBinder
+import android.os.ParcelFileDescriptor
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
 import java.io.OutputStream
-import java.io.RandomAccessFile
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
@@ -190,47 +192,60 @@ class StremioBridgeService : Service() {
             writeResponse(output, 404, "Not Found", "text/plain", "Not found".toByteArray())
             return
         }
-        val file = File(selected.optString("localPath"))
-        if (!file.exists() || !file.isFile) {
+        val descriptor = try {
+            val path = selected.optString("localPath")
+            val uri = Uri.parse(path)
+            if (uri.scheme == "content") {
+                contentResolver.openAssetFileDescriptor(uri, "r")
+            } else {
+                val file = if (uri.scheme == "file") File(uri.path ?: "") else File(path)
+                AssetFileDescriptor(ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY),
+                    0, AssetFileDescriptor.UNKNOWN_LENGTH)
+            }
+        } catch (_: Exception) { null }
+        if (descriptor == null) {
             writeResponse(output, 404, "Not Found", "text/plain", "File missing".toByteArray())
             return
         }
-        val length = file.length()
-        val parsed = parseRange(range, length)
-        if (range != null && parsed == null) {
-            output.write(("HTTP/1.1 416 Range Not Satisfiable\r\n" +
-                "Content-Range: bytes */$length\r\nContent-Length: 0\r\n" +
-                corsHeaders() + "Connection: close\r\n\r\n").toByteArray(StandardCharsets.UTF_8))
-            return
-        }
-        val start = parsed?.first ?: 0L
-        val end = parsed?.second ?: (length - 1)
-        val count = (end - start + 1).coerceAtLeast(0)
-        val status = if (parsed == null) "HTTP/1.1 200 OK" else "HTTP/1.1 206 Partial Content"
-        val filename = selected.optString("filename")
-        val header = buildString {
-            append("$status\r\n")
-            append("Content-Type: ${contentType(filename)}\r\n")
-            append("Content-Length: $count\r\n")
-            append("Accept-Ranges: bytes\r\n")
-            if (parsed != null) append("Content-Range: bytes $start-$end/$length\r\n")
-            append(corsHeaders())
-            append("Connection: close\r\n\r\n")
-        }
-        output.write(header.toByteArray(StandardCharsets.UTF_8))
-        if (method == "HEAD" || count == 0L) return
-        RandomAccessFile(file, "r").use { input ->
-            input.seek(start)
-            var remaining = count
-            val buffer = ByteArray(128 * 1024)
-            while (remaining > 0) {
-                val read = input.read(buffer, 0, min(buffer.size.toLong(), remaining).toInt())
-                if (read <= 0) break
-                output.write(buffer, 0, read)
-                remaining -= read
+        descriptor.use { asset ->
+            asset.createInputStream().use { input ->
+                val length = if (asset.declaredLength >= 0) asset.declaredLength
+                    else input.channel.size() - asset.startOffset
+                val parsed = parseRange(range, length)
+                if (range != null && parsed == null) {
+                    output.write(("HTTP/1.1 416 Range Not Satisfiable\r\n" +
+                        "Content-Range: bytes */$length\r\nContent-Length: 0\r\n" +
+                        corsHeaders() + "Connection: close\r\n\r\n").toByteArray(StandardCharsets.UTF_8))
+                    return
+                }
+                val start = parsed?.first ?: 0L
+                val end = parsed?.second ?: (length - 1)
+                val count = (end - start + 1).coerceAtLeast(0)
+                val status = if (parsed == null) "HTTP/1.1 200 OK" else "HTTP/1.1 206 Partial Content"
+                val filename = selected.optString("filename")
+                val header = buildString {
+                    append("$status\r\n")
+                    append("Content-Type: ${contentType(filename)}\r\n")
+                    append("Content-Length: $count\r\n")
+                    append("Accept-Ranges: bytes\r\n")
+                    if (parsed != null) append("Content-Range: bytes $start-$end/$length\r\n")
+                    append(corsHeaders())
+                    append("Connection: close\r\n\r\n")
+                }
+                output.write(header.toByteArray(StandardCharsets.UTF_8))
+                if (method == "HEAD" || count == 0L) return
+                input.channel.position(asset.startOffset + start)
+                var remaining = count
+                val buffer = ByteArray(128 * 1024)
+                while (remaining > 0) {
+                    val read = input.read(buffer, 0, min(buffer.size.toLong(), remaining).toInt())
+                    if (read <= 0) break
+                    output.write(buffer, 0, read)
+                    remaining -= read
+                }
+                output.flush()
             }
         }
-        output.flush()
     }
 
     private fun parseRange(value: String?, length: Long): Pair<Long, Long>? {

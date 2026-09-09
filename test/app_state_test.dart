@@ -13,6 +13,87 @@ import 'package:torbridge/services/setup_transfer_service.dart';
 import 'package:torbridge/services/stremio_bridge_service.dart';
 
 void main() {
+  for (final recovered in [
+    null,
+    '/current/movie.mp4',
+    'content://downloads/my_downloads/1986',
+  ]) {
+    test('startup reconciles saved downloads with source $recovered', () async {
+      final store = _MemoryStateStore()
+        ..value = StoredLocalState(
+          downloadRecords: [
+            {
+              'id': 'saved',
+              'title': 'Saved movie',
+              'status': 'complete',
+              'localPath': '/old/movie.mp4',
+              'platformId': '1986',
+              'mediaTitle': {
+                'id': 'tt0263757',
+                'type': 'movie',
+                'name': 'Saved movie',
+              },
+              'source': {
+                'addonName': 'Test',
+                'displayName': 'movie.mp4',
+                'description': '',
+              },
+            },
+          ],
+        );
+      final service = _ResolvingDownloadService(recovered);
+      final bridge = _FakeBridge();
+      final controller = TorBridgeController(
+        service,
+        bridge,
+        _EmptyCredentials(),
+        CinemetaClient(),
+        AioStreamsClient(),
+        store,
+      );
+      addTearDown(controller.dispose);
+      await controller.initialize();
+      final job = controller.state.downloads.single;
+      expect(
+        job.status,
+        recovered == null
+            ? DownloadStatus.unavailable
+            : DownloadStatus.complete,
+      );
+      expect(job.localPath, recovered ?? '/old/movie.mp4');
+      expect(job.platformId, '1986');
+      expect(service.checkedIds, ['1986']);
+      expect(service.deleted, isEmpty);
+      expect(store.value.downloadRecords.single['status'], job.status.name);
+      expect(bridge.lastEntries, recovered == null ? isEmpty : hasLength(1));
+      if (recovered == null) {
+        expect(await controller.localPlaybackSource(job), isNull);
+        expect(controller.state.notice, contains('Retry the download'));
+        // Remount/relink without downloading or dropping the record.
+        service.path = '/restored/movie.mp4';
+        await controller.retryDownload(controller.state.downloads.single);
+        expect(
+          controller.state.downloads.single.status,
+          DownloadStatus.complete,
+        );
+        expect(
+          controller.state.downloads.single.localPath,
+          '/restored/movie.mp4',
+        );
+      } else {
+        expect(bridge.lastEntries.single.localPath, recovered);
+        // A file can disappear after startup, before the user presses Play.
+        service.path = null;
+        expect(await controller.localPlaybackSource(job), isNull);
+        expect(
+          controller.state.downloads.single.status,
+          DownloadStatus.unavailable,
+        );
+        expect(bridge.lastEntries, isEmpty);
+      }
+    });
+  }
+
   test(
     'watched cleanup removes a completed file after the configured delay',
     () async {
@@ -721,17 +802,37 @@ class _BulkAioStreamsClient extends AioStreamsClient {
 }
 
 class _FakeBridge extends StremioBridgeService {
+  List<StremioBridgeEntry> lastEntries = [];
   @override
   Future<bool> ping() async => true;
 
   @override
-  Future<void> start(List<StremioBridgeEntry> entries) async {}
+  Future<void> start(List<StremioBridgeEntry> entries) async {
+    lastEntries = entries;
+  }
 
   @override
   Future<void> stop() async {}
 
   @override
-  Future<void> update(List<StremioBridgeEntry> entries) async {}
+  Future<void> update(List<StremioBridgeEntry> entries) async {
+    lastEntries = entries;
+  }
+}
+
+class _ResolvingDownloadService extends _RecordingDownloadService {
+  _ResolvingDownloadService(this.path);
+  String? path;
+  final checkedIds = <String?>[];
+
+  @override
+  Future<String?> resolveLocalPath({
+    String? localPath,
+    String? platformId,
+  }) async {
+    checkedIds.add(platformId);
+    return path;
+  }
 }
 
 class _EmptyCredentials implements CredentialStore {

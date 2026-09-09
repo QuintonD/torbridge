@@ -22,7 +22,7 @@ import '../services/setup_transfer_service.dart';
 import '../services/stremio_bridge_service.dart';
 import '../services/playback_launcher.dart';
 
-enum DownloadStatus { queued, downloading, complete, failed }
+enum DownloadStatus { queued, downloading, complete, failed, unavailable }
 
 enum ConnectionPhase { idle, checking, ready, error }
 
@@ -79,6 +79,9 @@ class DownloadJob {
   final DateTime? createdAt;
   final DateTime? completedAt;
   final DateTime? watchedAt;
+
+  bool get needsAttention =>
+      status == DownloadStatus.failed || status == DownloadStatus.unavailable;
 
   String get videoId => mediaVideo?.id ?? mediaTitle.id;
 
@@ -329,7 +332,8 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
         watchedTitleIds: local.watchedTitleIds,
         downloads: jobs,
       );
-      if (jobs.any((job) => job.status == DownloadStatus.complete)) {
+      await checkDownloadedFiles();
+      if (state.downloads.any((job) => job.status == DownloadStatus.complete)) {
         await _ensureBridge();
       }
       _resumeInterruptedDownloads();
@@ -664,7 +668,7 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
       (item) =>
           item.videoId == videoId &&
           item.source.id == source.id &&
-          item.status != DownloadStatus.failed,
+          !item.needsAttention,
     );
     if (existing.isNotEmpty) {
       navigate(1);
@@ -724,7 +728,7 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     );
     for (final video in requested) {
       final exists = state.downloads.any(
-        (job) => job.videoId == video.id && job.status != DownloadStatus.failed,
+        (job) => job.videoId == video.id && !job.needsAttention,
       );
       if (exists) {
         alreadyAdded++;
@@ -984,6 +988,11 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
   }
 
   Future<void> retryDownload(DownloadJob job) async {
+    // Storage may have become available again since the last check.
+    if (job.status == DownloadStatus.unavailable &&
+        await localPlaybackSource(job) != null) {
+      return;
+    }
     final refreshed = await _refreshSource(job);
     final replacement = job.copyWith(
       source: refreshed ?? job.source,
@@ -1076,23 +1085,15 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     } catch (_) {
       if (mounted) {
         state = state.copyWith(
-          notice: 'Local playback could not start. Check that the file exists and try Play in TorBridge.',
+          notice: 'Local playback could not start. Check Diagnostics; unavailable files can be retried from Downloads → Needs attention.',
         );
       }
     }
   }
 
   Future<Uri> _localPlaybackUrl(DownloadJob job) async {
-    final path = job.localPath;
-    if (job.status != DownloadStatus.complete || path == null) {
-      throw StateError('Download is not complete.');
-    }
-    if (!path.startsWith('content://')) {
-      final file = path.startsWith('file://')
-          ? File.fromUri(Uri.parse(path))
-          : File(path);
-      if (!await file.exists()) throw StateError('Downloaded file is missing.');
-    }
+    final path = await localPlaybackSource(job);
+    if (path == null) throw StateError('Downloaded file is unavailable.');
     await _ensureBridge();
     if (!await _stremioBridge.ping()) {
       throw StateError('Local bridge is unavailable.');
@@ -1106,7 +1107,7 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     try {
       final source = Platform.isAndroid
           ? (await _localPlaybackUrl(job)).toString()
-          : job.localPath;
+          : await localPlaybackSource(job);
       if (source == null) throw StateError('Downloaded file is missing.');
       final opened = await PlaybackLauncher().openExternal(
         source,
@@ -1122,7 +1123,7 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     } catch (_) {
       if (mounted) {
         state = state.copyWith(
-          notice: 'Could not open the local video in an external player.',
+          notice: 'Could not open the local video. Check Diagnostics; unavailable files can be retried from Downloads → Needs attention.',
         );
       }
     }
@@ -1179,8 +1180,64 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     }
   }
 
+  /// Reconcile saved completion records without deleting files or downloading.
+  Future<void> checkDownloadedFiles() async {
+    for (final job in List<DownloadJob>.of(state.downloads)) {
+      if (job.status == DownloadStatus.complete ||
+          job.status == DownloadStatus.unavailable) {
+        await localPlaybackSource(job, showNotice: false);
+      }
+    }
+  }
+
+  Future<String?> localPlaybackSource(
+    DownloadJob job, {
+    bool showNotice = true,
+  }) async {
+    if (job.status != DownloadStatus.complete &&
+        job.status != DownloadStatus.unavailable) {
+      return null;
+    }
+    String? path;
+    try {
+      path = await _downloadService.resolveLocalPath(
+        localPath: job.localPath,
+        platformId: job.platformId,
+      );
+    } catch (_) {
+      // A platform/storage failure must not discard the original record.
+    }
+    if (!mounted) return null;
+    // Do not overwrite a retry, deletion, or watched update while checking I/O.
+    final current = state.downloads
+        .where((item) => item.id == job.id)
+        .firstOrNull;
+    if (!identical(current, job)) return null;
+    const unavailableMessage =
+        'The video file is missing or cannot be read. Retry the download while online.';
+    final status = path == null
+        ? DownloadStatus.unavailable
+        : DownloadStatus.complete;
+    if (job.status != status || (path != null && path != job.localPath)) {
+      _replaceJob(
+        job.copyWith(
+          status: status,
+          localPath: path ?? job.localPath,
+          error: path == null ? unavailableMessage : null,
+        ),
+        persist: false,
+      );
+      await _saveDownloads();
+    }
+    if (path == null && showNotice && mounted) {
+      state = state.copyWith(notice: unavailableMessage);
+    }
+    return path;
+  }
+
   Future<void> runDiagnostics() async {
     final checks = <String, String>{};
+    await checkDownloadedFiles();
     try {
       await _ensureBridge();
       checks['Local Stremio addon'] = await _stremioBridge.ping()
@@ -1190,19 +1247,16 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
       checks['Local Stremio addon'] = 'Failed: $error';
     }
     final complete = state.downloads.where(
-      (job) => job.status == DownloadStatus.complete,
+      (job) =>
+          job.status == DownloadStatus.complete ||
+          job.status == DownloadStatus.unavailable,
     );
-    var missing = 0;
-    for (final job in complete) {
-      final path = job.localPath;
-      if (path == null || path.startsWith('content://')) continue;
-      final uri = Uri.tryParse(path);
-      final file = uri?.scheme == 'file' ? File.fromUri(uri!) : File(path);
-      if (!await file.exists()) missing++;
-    }
+    final missing = complete
+        .where((job) => job.status == DownloadStatus.unavailable)
+        .length;
     checks['Downloaded files'] = missing == 0
-        ? '${complete.length} available; no missing paths detected'
-        : '$missing of ${complete.length} files are missing';
+        ? '${complete.length} readable files available'
+        : '$missing of ${complete.length} files are unavailable. Open Downloads → Needs attention to retry. Saved records do not contain the video files.';
     checks['Episode identity'] =
         state.downloads.every(
           (job) => !job.mediaTitle.isSeries || job.mediaVideo != null,

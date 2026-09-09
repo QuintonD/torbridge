@@ -171,7 +171,8 @@ class _CheckRow extends StatelessWidget {
     final lower = detail.toLowerCase();
     final problem =
         lower.startsWith('failed') ||
-        RegExp(r'^\d+ of \d+ files are missing').hasMatch(lower) ||
+        RegExp(r'^\d+ of \d+ files are (missing|unavailable)')
+            .hasMatch(lower) ||
         lower.contains('not responding');
     return ListTile(
       contentPadding: EdgeInsets.zero,

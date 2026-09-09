@@ -21,6 +21,10 @@ class MainActivity : FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, downloadChannelName)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
+                    "resolve" -> result.success(LocalDownloadAccess(this).resolve(
+                        call.argument<String>("path"),
+                        call.argument<Number>("id")?.toLong()
+                    ))
                     "enqueue" -> {
                         val url = call.argument<String>("url")
                         val filename = call.argument<String>("filename")

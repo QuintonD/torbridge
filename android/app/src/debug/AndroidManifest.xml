@@ -4,4 +4,6 @@
          to allow setting breakpoints, to provide hot reload, etc.
     -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Allow the on-device HTTP fixture used by download integration tests. -->
+    <application android:networkSecurityConfig="@xml/debug_network_security" />
 </manifest>

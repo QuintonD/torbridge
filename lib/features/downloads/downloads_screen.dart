@@ -31,7 +31,7 @@ class _DownloadsScreenState extends ConsumerState<DownloadsScreen> {
             _DownloadFilter.active =>
               job.status == DownloadStatus.queued ||
                   job.status == DownloadStatus.downloading,
-            _DownloadFilter.failed => job.status == DownloadStatus.failed,
+            _DownloadFilter.failed => job.needsAttention,
           },
         )
         .toList();
@@ -223,7 +223,7 @@ class _DownloadTile extends ConsumerWidget {
                       Text(
                         _statusText(job),
                         style: TextStyle(
-                          color: job.status == DownloadStatus.failed
+                          color: job.needsAttention
                               ? Theme.of(context).colorScheme.error
                               : complete
                               ? const Color(0xFF75D6A4)
@@ -238,7 +238,7 @@ class _DownloadTile extends ConsumerWidget {
                   tooltip: 'Download actions',
                   onSelected: (action) => _runAction(context, ref, action),
                   itemBuilder: (_) => [
-                    if (complete || job.status == DownloadStatus.failed)
+                    if (complete || job.needsAttention)
                       const PopupMenuItem(
                         value: _DownloadAction.changeVersion,
                         child: ListTile(
@@ -247,7 +247,7 @@ class _DownloadTile extends ConsumerWidget {
                           contentPadding: EdgeInsets.zero,
                         ),
                       ),
-                    if (complete || job.status == DownloadStatus.failed)
+                    if (complete || job.needsAttention)
                       const PopupMenuItem(
                         value: _DownloadAction.changeRules,
                         child: ListTile(
@@ -325,7 +325,7 @@ class _DownloadTile extends ConsumerWidget {
                     icon: const Icon(Icons.open_in_new),
                     label: const Text('External player'),
                   ),
-                ] else if (job.status == DownloadStatus.failed)
+                ] else if (job.needsAttention)
                   FilledButton.tonalIcon(
                     onPressed: () => unawaited(controller.retryDownload(job)),
                     icon: const Icon(Icons.refresh),
@@ -378,7 +378,7 @@ class _DownloadTile extends ConsumerWidget {
         controller.prepareAnotherVersion(job);
         controller.navigate(3);
       case _DownloadAction.playFallback:
-        final path = job.localPath;
+        final path = await controller.localPlaybackSource(job);
         if (path == null || !context.mounted) return;
         await Navigator.of(context).push(
           MaterialPageRoute<void>(
@@ -419,6 +419,8 @@ class _DownloadTile extends ConsumerWidget {
     DownloadStatus.downloading =>
       'Downloading ? ${(job.progress * 100).round()}%',
     DownloadStatus.complete => 'Ready offline',
+    DownloadStatus.unavailable =>
+      'File unavailable — ${job.error ?? 'Retry the download while online.'}',
     DownloadStatus.failed =>
       'Download failed — ${job.error ?? 'unknown error'}',
   };

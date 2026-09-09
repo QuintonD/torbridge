@@ -57,6 +57,27 @@ class DownloadFailureException implements Exception {
 abstract class DownloadService {
   bool get supportsResume => false;
 
+  /// Returns a readable local source, or null if the saved file is unavailable.
+  /// Never starts a transfer or deletes the existing download.
+  Future<String?> resolveLocalPath({
+    String? localPath,
+    String? platformId,
+  }) async {
+    if (localPath == null || localPath.isEmpty) return null;
+    try {
+      final uri = Uri.tryParse(localPath);
+      final file = uri?.scheme == 'file' ? File.fromUri(uri!) : File(localPath);
+      final input = await file.open();
+      try {
+        return await input.length() > 0 ? file.path : null;
+      } finally {
+        await input.close();
+      }
+    } on FileSystemException {
+      return null;
+    }
+  }
+
   Future<String> download({
     required String jobId,
     required Uri url,
@@ -84,6 +105,13 @@ abstract class DownloadService {
 
 class AndroidSystemDownloadService extends DownloadService {
   static const _channel = MethodChannel('app.torbridge/downloads');
+
+  @override
+  Future<String?> resolveLocalPath({String? localPath, String? platformId}) =>
+      _channel.invokeMethod<String>('resolve', {
+        'path': localPath,
+        'id': int.tryParse(platformId ?? ''),
+      });
 
   @override
   bool get supportsResume => true;
@@ -134,9 +162,14 @@ class AndroidSystemDownloadService extends DownloadService {
       onProgress(received, total);
       switch (status['state']) {
         case 'complete':
-          final localPath = '${status['localPath'] ?? ''}';
-          if (localPath.isEmpty) {
-            throw StateError('Android completed the download without a path.');
+          final localPath = await resolveLocalPath(
+            localPath: status['localPath'] as String?,
+            platformId: '$id',
+          );
+          if (localPath == null) {
+            throw StateError(
+              'Android finished the transfer, but the video file is unavailable. Retry the download.',
+            );
           }
           return localPath;
         case 'failed':

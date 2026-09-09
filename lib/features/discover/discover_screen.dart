@@ -394,7 +394,7 @@ class _EpisodePicker extends ConsumerWidget {
     final alreadyAdded = ref.watch(
       torBridgeControllerProvider.select(
         (state) => state.downloads
-            .where((job) => job.status != DownloadStatus.failed)
+            .where((job) => !job.needsAttention)
             .map((job) => job.videoId)
             .toSet(),
       ),
