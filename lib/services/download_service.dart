@@ -58,7 +58,8 @@ abstract class DownloadService {
   bool get supportsResume => false;
 
   /// Returns a readable local source, or null if the saved file is unavailable.
-  /// Never starts a transfer or deletes the existing download.
+  /// Android also moves completed app-private files out of DownloadManager's
+  /// cleanup path. Never starts a network transfer or discards video data.
   Future<String?> resolveLocalPath({
     String? localPath,
     String? platformId,
@@ -77,6 +78,8 @@ abstract class DownloadService {
       return null;
     }
   }
+
+  String? localFileWarning(String path) => null;
 
   Future<String> download({
     required String jobId,
@@ -105,13 +108,33 @@ abstract class DownloadService {
 
 class AndroidSystemDownloadService extends DownloadService {
   static const _channel = MethodChannel('app.torbridge/downloads');
+  final Map<String, String> _retentionWarnings = {};
 
   @override
-  Future<String?> resolveLocalPath({String? localPath, String? platformId}) =>
-      _channel.invokeMethod<String>('resolve', {
+  String? localFileWarning(String path) => _retentionWarnings[path];
+
+  @override
+  Future<String?> resolveLocalPath({
+    String? localPath,
+    String? platformId,
+  }) async {
+    try {
+      final resolved = await _channel.invokeMethod<String>('resolve', {
         'path': localPath,
         'id': int.tryParse(platformId ?? ''),
       });
+      _retentionWarnings.remove(localPath);
+      _retentionWarnings.remove(resolved);
+      return resolved;
+    } on PlatformException catch (error) {
+      if (error.code != 'retention_failed' || error.details is! String) rethrow;
+      // Native code verified the original before attempting a safe rename.
+      // Keep playback available and report protection failure separately.
+      final source = error.details as String;
+      _retentionWarnings[source] = error.message ?? 'Could not protect this video from Android cleanup. Run Diagnostics again.';
+      return source;
+    }
+  }
 
   @override
   bool get supportsResume => true;

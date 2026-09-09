@@ -21,10 +21,16 @@ class MainActivity : FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, downloadChannelName)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
-                    "resolve" -> result.success(LocalDownloadAccess(this).resolve(
-                        call.argument<String>("path"),
-                        call.argument<Number>("id")?.toLong()
-                    ))
+                    "resolve" -> try {
+                        result.success(LocalDownloadAccess(this).resolve(
+                            call.argument<String>("path"),
+                            call.argument<Number>("id")?.toLong()
+                        ))
+                    } catch (error: DownloadRetentionException) {
+                        result.error("retention_failed", error.message, error.source)
+                    } catch (error: Exception) {
+                        result.error("storage_failed", "Could not check the downloaded file.", null)
+                    }
                     "enqueue" -> {
                         val url = call.argument<String>("url")
                         val filename = call.argument<String>("filename")
@@ -59,9 +65,11 @@ class MainActivity : FlutterActivity() {
                         if (id == null) {
                             result.error("invalid_id", "A download ID is required.", null)
                         } else {
-                            manager().remove(id)
-                            downloadPath(id)?.let { File(it).delete() }
-                            forgetDownload(id)
+                            synchronized(LocalDownloadAccess.lock) {
+                                manager().remove(id)
+                                downloadPath(id)?.let { File(it).delete() }
+                                forgetDownload(id)
+                            }
                             result.success(null)
                         }
                     }
@@ -134,7 +142,7 @@ class MainActivity : FlutterActivity() {
         headers: Map<String, String>
     ): Map<String, Any> {
         val base = getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: filesDir
-        val directory = File(base, "TorBridge").apply { mkdirs() }
+        val directory = File(base, "TorBridge/Transfers/${java.util.UUID.randomUUID()}").apply { mkdirs() }
         val target = uniqueFile(directory, filename)
         val request = DownloadManager.Request(Uri.parse(url))
             .setTitle(filename)
@@ -152,12 +160,20 @@ class MainActivity : FlutterActivity() {
 
         request.setDestinationUri(Uri.fromFile(target))
         val id = manager().enqueue(request)
-        getSharedPreferences(DOWNLOAD_PREFS, Context.MODE_PRIVATE)
-            .edit().putString("path_$id", target.absolutePath).apply()
+        val saved = getSharedPreferences(DOWNLOAD_PREFS, Context.MODE_PRIVATE)
+            .edit().putString("path_$id", target.absolutePath).commit()
+        if (!saved) {
+            manager().remove(id)
+            throw java.io.IOException("Could not save the download location.")
+        }
         return mapOf("id" to id, "path" to target.absolutePath)
     }
 
     private fun status(id: Long): Map<String, Any?> {
+        DownloadRetention(this).retainedPath(id)?.let {
+            val size = File(it).length()
+            return mapOf("state" to "complete", "downloaded" to size, "total" to size, "localPath" to it)
+        }
         val query = DownloadManager.Query().setFilterById(id)
         manager().query(query).use { cursor ->
             if (!cursor.moveToFirst()) {
@@ -194,7 +210,7 @@ class MainActivity : FlutterActivity() {
 
     private fun forgetDownload(id: Long) {
         getSharedPreferences(DOWNLOAD_PREFS, Context.MODE_PRIVATE)
-            .edit().remove("path_$id").apply()
+            .edit().remove("path_$id").remove("retained_$id").apply()
     }
 
     private fun deletePath(value: String): Boolean {

@@ -37,6 +37,38 @@ void main() {
   tearDown(() => messenger.setMockMethodCallHandler(channel, null));
 
   test(
+    'retention failure keeps the readable original and reports a warning',
+    () async {
+      final service = AndroidSystemDownloadService();
+      messenger.setMockMethodCallHandler(channel, (_) async {
+        throw PlatformException(
+          code: 'retention_failed',
+          message: 'Original kept. Run Diagnostics again.',
+          details: '/original.mp4',
+        );
+      });
+      expect(
+        await service.resolveLocalPath(localPath: '/original.mp4'),
+        '/original.mp4',
+      );
+      expect(
+        service.localFileWarning('/original.mp4'),
+        contains('Original kept'),
+      );
+      messenger.setMockMethodCallHandler(
+        channel,
+        (_) async => '/library/original.mp4',
+      );
+      expect(
+        await service.resolveLocalPath(localPath: '/original.mp4'),
+        '/library/original.mp4',
+      );
+      expect(service.localFileWarning('/original.mp4'), isNull);
+      expect(service.localFileWarning('/library/original.mp4'), isNull);
+    },
+  );
+
+  test(
     'Android checks a completed transfer and recovers its current source',
     () async {
       messenger.setMockMethodCallHandler(channel, (call) async {

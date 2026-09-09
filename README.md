@@ -10,7 +10,9 @@ uses your configured AIOStreams manifest and TorBox account; Trakt is optional.
 
 ## Installable builds
 
-- `dist/TorBridge-Android-1.2.8.apk` — sideloadable Android APK (Android 7+
+- `dist/TorBridge-Android-1.2.9-arm64.apk` — smaller Android APK for ARM64 phones,
+  including Pixel 7a and Galaxy S25. Install over the existing app.
+- `dist/TorBridge-Android-1.2.9.apk` — sideloadable Android APK (Android 7+
   by Flutter's current minimum; tested on API 30, 34, and 36).
 - `dist/TorBridge-Windows-x64-1.2.7.zip` — extract the complete archive and run
   `torbridge.exe`. Do not move the executable away from its adjacent DLL and
@@ -24,12 +26,17 @@ responsive headers, and clearer search controls. See the [UI pass](docs/ui-pass/
 for rendered previews and the imagegen design reference. Install the Android APK
 over the existing app to retain app data; do not uninstall first.
 
-Android 1.2.8 checks saved downloads before playback and recovers readable
-locations through Android's Download Manager. Unreadable files appear under
-**Downloads → Needs attention**, with **Retry download**. Checks retain the
-original record and do not delete files or start transfers. See the
-[download recovery notes](docs/android-download-recovery.md) for validation
-and the remaining Pixel 7a investigation.
+Android 1.2.9 moves completed downloads into TorBridge's own library so Android
+Download Manager cleanup cannot remove the retained video. Open the updated app
+once on each device to migrate existing readable downloads. Unavailable files
+remain under **Downloads → Needs attention**, with **Retry download**. See the
+[retention fix](docs/android-download-retention.md) and earlier
+[download recovery notes](docs/android-download-recovery.md).
+
+Build the smaller APK with `./tool/build_android.ps1 -Arm64`. Both Android
+artifacts use the same signing key and version code, so switching between
+universal and ARM64 builds does not prevent future updates. Updating the app
+does not re-download its saved videos.
 
 ## First run
 

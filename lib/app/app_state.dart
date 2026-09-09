@@ -322,6 +322,7 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
   Timer? _maintenanceTimer;
   Future<void> _downloadSaveTail = Future<void>.value();
   Future<void> _torBoxProvisionTail = Future<void>.value();
+  final Set<String> _retryingDownloadIds = {};
 
   Future<void> initialize() async {
     try {
@@ -819,7 +820,7 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
           progress: 1,
           localPath: localPath,
           completedAt: DateTime.now().toUtc(),
-          error: null,
+          error: _downloadService.localFileWarning(localPath),
         ),
       );
       await _ensureBridge();
@@ -842,6 +843,9 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
             '',
           );
     final origin = source.streamUrl?.host;
+    if (error is DownloadFailureException && error.reason >= 1000) {
+      return message;
+    }
     return origin == null || origin.isEmpty ? message : '$message from $origin';
   }
 
@@ -988,23 +992,49 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
   }
 
   Future<void> retryDownload(DownloadJob job) async {
-    // Storage may have become available again since the last check.
-    if (job.status == DownloadStatus.unavailable &&
-        await localPlaybackSource(job) != null) {
-      return;
+    if (!_retryingDownloadIds.add(job.id)) return;
+    try {
+      final current = state.downloads
+          .where((item) => item.id == job.id)
+          .firstOrNull;
+      if (current == null || !current.needsAttention) return;
+      // Storage may have become available again since the last check.
+      if (current.status == DownloadStatus.unavailable &&
+          await localPlaybackSource(current) != null) {
+        return;
+      }
+      _replaceJob(current.copyWith(status: DownloadStatus.queued, error: null));
+      final refreshed = await _refreshSource(current);
+      final latest = state.downloads
+          .where((item) => item.id == job.id)
+          .firstOrNull;
+      // A cancellation while sources were being refreshed must stay cancelled.
+      if (latest == null || latest.status != DownloadStatus.queued) return;
+      final replacement = latest.copyWith(
+        source: refreshed ?? latest.source,
+        progress: 0,
+        localPath: null,
+        platformId: null,
+        completedAt: null,
+        error: null,
+      );
+      _replaceJob(replacement);
+      await _runDownload(replacement);
+    } catch (error) {
+      final current = state.downloads
+          .where((item) => item.id == job.id)
+          .firstOrNull;
+      if (current != null && current.status == DownloadStatus.queued) {
+        _replaceJob(
+          current.copyWith(
+            status: DownloadStatus.failed,
+            error: _errorMessage(error, current.source),
+          ),
+        );
+      }
+    } finally {
+      _retryingDownloadIds.remove(job.id);
     }
-    final refreshed = await _refreshSource(job);
-    final replacement = job.copyWith(
-      source: refreshed ?? job.source,
-      status: DownloadStatus.queued,
-      progress: 0,
-      localPath: null,
-      platformId: null,
-      completedAt: null,
-      error: null,
-    );
-    _replaceJob(replacement);
-    await _runDownload(replacement);
   }
 
   Future<void> cancelDownload(DownloadJob job) async {
@@ -1180,7 +1210,7 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     }
   }
 
-  /// Reconcile saved completion records without deleting files or downloading.
+  /// Reconcile and retain saved files without discarding videos or downloading.
   Future<void> checkDownloadedFiles() async {
     for (final job in List<DownloadJob>.of(state.downloads)) {
       if (job.status == DownloadStatus.complete ||
@@ -1218,12 +1248,17 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     final status = path == null
         ? DownloadStatus.unavailable
         : DownloadStatus.complete;
-    if (job.status != status || (path != null && path != job.localPath)) {
+    final error = path == null
+        ? unavailableMessage
+        : _downloadService.localFileWarning(path);
+    if (job.status != status ||
+        (path != null && path != job.localPath) ||
+        job.error != error) {
       _replaceJob(
         job.copyWith(
           status: status,
           localPath: path ?? job.localPath,
-          error: path == null ? unavailableMessage : null,
+          error: error,
         ),
         persist: false,
       );
@@ -1257,6 +1292,14 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     checks['Downloaded files'] = missing == 0
         ? '${complete.length} readable files available'
         : '$missing of ${complete.length} files are unavailable. Open Downloads → Needs attention to retry. Saved records do not contain the video files.';
+    final protectionFailures = complete
+        .where(
+          (job) => job.status == DownloadStatus.complete && job.error != null,
+        )
+        .length;
+    checks['Offline storage protection'] = protectionFailures == 0
+        ? 'No storage protection errors detected'
+        : 'Failed to protect $protectionFailures videos from Android cleanup. Original files remain playable; run checks again.';
     checks['Episode identity'] =
         state.downloads.every(
           (job) => !job.mediaTitle.isSeries || job.mediaVideo != null,
@@ -1684,7 +1727,7 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
           progress: 1,
           localPath: path,
           completedAt: DateTime.now().toUtc(),
-          error: null,
+          error: _downloadService.localFileWarning(path),
         ),
       );
       await _ensureBridge();

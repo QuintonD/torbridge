@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:torbridge/app/app_state.dart';
 import 'package:torbridge/data/demo_catalog.dart';
@@ -13,6 +15,32 @@ import 'package:torbridge/services/setup_transfer_service.dart';
 import 'package:torbridge/services/stremio_bridge_service.dart';
 
 void main() {
+  test('local destination errors do not blame the host and double retry starts one transfer', () async {
+    final service = _DestinationConflictService();
+    final controller = TorBridgeController(
+      service,
+      _FakeBridge(),
+      _EmptyCredentials(),
+      CinemetaClient(),
+      AioStreamsClient(),
+      _MemoryStateStore(),
+    );
+    addTearDown(controller.dispose);
+    await controller.initialize();
+    await controller.downloadCandidate(_fallbackCandidate);
+    final failed = controller.state.downloads.single;
+    expect(failed.status, DownloadStatus.failed);
+    expect(failed.error, 'the file already exists');
+    final firstRetry = controller.retryDownload(failed);
+    final secondRetry = controller.retryDownload(failed);
+    await service.retryStarted.future;
+    expect(service.calls, 2); // One original failure and exactly one retry.
+    service.release.complete();
+    await Future.wait([firstRetry, secondRetry]);
+    expect(controller.state.downloads.single.status, DownloadStatus.complete);
+    await controller.retryDownload(failed); // Ignore a stale button callback.
+    expect(service.calls, 2);
+  });
   for (final recovered in [
     null,
     '/current/movie.mp4',
@@ -90,6 +118,18 @@ void main() {
           DownloadStatus.unavailable,
         );
         expect(bridge.lastEntries, isEmpty);
+        // A failed protective move does not make a readable video unavailable.
+        service.path = recovered;
+        service.warning = 'Original kept. Run Diagnostics again.';
+        await controller.checkDownloadedFiles();
+        expect(
+          controller.state.downloads.single.status,
+          DownloadStatus.complete,
+        );
+        expect(controller.state.downloads.single.error, service.warning);
+        service.warning = null;
+        await controller.checkDownloadedFiles();
+        expect(controller.state.downloads.single.error, isNull);
       }
     });
   }
@@ -472,6 +512,28 @@ final _urlOnlyCandidate = StreamCandidate(
   streamUrl: Uri.parse('https://torrentio.example/broken'),
 );
 
+class _DestinationConflictService extends DownloadService {
+  int calls = 0;
+  final retryStarted = Completer<void>();
+  final release = Completer<void>();
+
+  @override
+  Future<String> download({
+    required String jobId,
+    required Uri url,
+    required String suggestedName,
+    required DownloadProgressCallback onProgress,
+    DownloadEnqueuedCallback? onEnqueued,
+    Map<String, String> requestHeaders = const {},
+  }) async {
+    calls++;
+    if (calls == 1) throw const DownloadFailureException(1008);
+    retryStarted.complete();
+    await release.future;
+    return 'C:/TorBridge/retained.mp4';
+  }
+}
+
 class _RecordingDownloadService extends DownloadService {
   final List<String> deleted = [];
   final List<Uri> urls = [];
@@ -823,6 +885,9 @@ class _FakeBridge extends StremioBridgeService {
 class _ResolvingDownloadService extends _RecordingDownloadService {
   _ResolvingDownloadService(this.path);
   String? path;
+  String? warning;
+  @override
+  String? localFileWarning(String path) => warning;
   final checkedIds = <String?>[];
 
   @override

@@ -231,6 +231,13 @@ class _DownloadTile extends ConsumerWidget {
                         ),
                       ),
                       if (job.watchedAt != null) const Text('Watched'),
+                      if (complete && job.error != null)
+                        Text(
+                          job.error!,
+                          style: TextStyle(
+                            color: Theme.of(context).colorScheme.error,
+                          ),
+                        ),
                     ],
                   ),
                 ),
