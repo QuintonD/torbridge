@@ -45,6 +45,9 @@ Install the update, then retry one affected video while online and check playbac
 The previous library retention protection remains in place.
 [Read the investigation and validation](docs/android-download-retry.md).
 
+The [application audit](docs/application-audit-2026-09-10.md) documents additional
+known issues and reproducible cases. Those findings are not fixed by 1.2.10.
+
 ## A look inside
 
 <p align="center">
@@ -155,17 +158,15 @@ cold start. Windows reports an interrupted in-process download as retryable.
 Secrets are held in platform secure storage. Short-lived TorBox CDN links are
 requested only when a download starts and are not saved in app state.
 
-When an addon playback URL fails with a retryable HTTP error, TorBridge first
+When an addon playback URL fails with a recoverable transfer error, TorBridge first
 refreshes it and tries a suitable alternative. It then falls back automatically
 to a fresh TorBox CDN link. When the source includes an info-hash, TorBridge
 adds or finds that torrent and selects its referenced file. For URL-only
-sources, it searches the connected TorBox account for the exact title and
-`SxxExx` file. If the torrent is not owned yet, TorBridge searches TorBox by
-IMDb ID and episode, adds a suitable cached magnet, waits for its file list,
-and selects the exact episode itself. This shared recovery path also applies to
-season batch downloads; a season pack is added once and reused for its other
-episodes. If no exact file is available, TorBridge reports that instead of
-risking the wrong episode.
+sources, it searches the connected TorBox account using title and episode names.
+This recovery path also applies to season batch downloads. It does not perform
+an independent TorBox IMDb search to acquire missing URL-only torrents.
+Episode-file matching has known edge cases with stale indices and numeric
+prefixes; see [audit A01](docs/application-audit-2026-09-10.md#a01--episode-identity-must-be-verified-against-the-file).
 
 Download cards preserve quality, codec, HDR/release, audio, subtitle, size, and
 source metadata. Use **Find another version** to pick a suitable alternative or
