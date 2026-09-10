@@ -21,6 +21,12 @@ class MainActivity : FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, downloadChannelName)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
+                    "availableBytes" -> try {
+                        val directory = getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: filesDir
+                        result.success(android.os.StatFs(directory.absolutePath).availableBytes)
+                    } catch (_: Exception) {
+                        result.error("storage_failed", "Could not check free download storage.", null)
+                    }
                     "resolve" -> try {
                         result.success(LocalDownloadAccess(this).resolve(
                             call.argument<String>("path"),
@@ -204,6 +210,9 @@ class MainActivity : FlutterActivity() {
                 "downloaded" to downloaded,
                 "total" to total,
                 "reason" to reason,
+                // Only expose the hostname, never signed URLs or query tokens.
+                "host" to Uri.parse(cursor.getString(cursor.getColumnIndexOrThrow(
+                    DownloadManager.COLUMN_URI))).host,
                 "localPath" to downloadPath(id)
             )
         }

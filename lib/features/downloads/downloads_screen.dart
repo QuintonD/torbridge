@@ -422,7 +422,7 @@ class _DownloadTile extends ConsumerWidget {
   }
 
   String _statusText(DownloadJob job) => switch (job.status) {
-    DownloadStatus.queued => 'Preparing download…',
+    DownloadStatus.queued => job.error ?? 'Preparing download…',
     DownloadStatus.downloading =>
       job.error ?? 'Downloading · ${(job.progress * 100).round()}%',
     DownloadStatus.complete => 'Ready offline',

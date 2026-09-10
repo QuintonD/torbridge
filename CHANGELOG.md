@@ -3,6 +3,22 @@
 Installable files are available in [GitHub Releases](https://github.com/QuintonD/torbridge/releases).
 Android and Windows can have different current versions.
 
+## Android and Windows 1.2.12 - 2026-09-10
+
+- Include HTTP 400 and restored Android transfers in bounded source recovery.
+- Queue new Android transfers and old-job recovery attempts one at a time;
+  persist waiting jobs and refresh their sources when they start.
+- Check estimated size against free download storage with 512 MiB of headroom.
+  Show available space in Diagnostics and stop recovery on storage errors.
+- Preserve failed storage records and native IDs; report request hostnames
+  without exposing signed URLs. Bound recovery link preparation.
+- An active Android transfer can continue outside the app; reopen TorBridge to
+  start the next queued item if Android closes the process.
+
+Validation: 88 host tests, four native API 36 tests, and clean analysis. Physical
+Pixel 7a / Android 17 and live provider behavior remain unverified.
+[Investigation](docs/android-download-batches.md) - [Release notes](docs/releases/v1.2.12.md).
+
 ## Android and Windows 1.2.11 - 2026-09-10
 
 - Fix every reproduced issue and additional finding from the September audit:

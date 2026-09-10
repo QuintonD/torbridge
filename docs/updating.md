@@ -21,6 +21,11 @@ Updating preserves existing settings and records, but cannot restore video bytes
 already deleted from the phone. If a video remains under **Needs attention**,
 retry one download while online and confirm playback before retrying the rest.
 
+From 1.2.12, new Android transfers run one at a time and waiting items are saved.
+If Android closes TorBridge, the active system transfer can continue, but reopen
+the app to start the next queued item. Diagnostics shows available download
+storage; estimates cannot reserve space or guarantee that every queued file fits.
+
 If Android refuses an update, note its exact message and your currently installed
 version. Do not uninstall as a first troubleshooting step. Report the details in
 [a bug report](https://github.com/QuintonD/torbridge/issues/new?template=bug_report.yml).
@@ -50,7 +55,7 @@ folder. It leaves user settings and downloaded media untouched.
 New releases include `SHA256SUMS.txt`. On Windows, compare its entry with:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 -LiteralPath .\TorBridge-Android-1.2.11-arm64.apk
+Get-FileHash -Algorithm SHA256 -LiteralPath .\TorBridge-Android-1.2.12-arm64.apk
 ```
 
 Only install release files from this repository. The files GitHub labels

@@ -8,11 +8,13 @@ typedef DownloadProgressCallback = void Function(int received, int total);
 typedef DownloadEnqueuedCallback = void Function(String platformId);
 
 class DownloadFailureException implements Exception {
-  const DownloadFailureException(this.reason);
+  const DownloadFailureException(this.reason, {this.host});
 
   final int reason;
+  final String? host;
 
   bool get isRetryableSourceFailure =>
+      reason == 400 ||
       reason == 401 ||
       reason == 403 ||
       reason == 404 ||
@@ -31,7 +33,7 @@ class DownloadFailureException implements Exception {
     1002 => 'an unhandled HTTP response',
     1004 => 'an HTTP transfer error',
     1005 => 'too many redirects',
-    1006 => 'insufficient storage',
+    1006 => 'Android reported insufficient storage. Check free space or choose a smaller file, then retry',
     1007 => 'the target device was unavailable',
     1008 => 'Android could not resume the interrupted download',
     1009 => 'the file already exists',
@@ -42,6 +44,7 @@ class DownloadFailureException implements Exception {
   String toString() => description;
 
   static String _httpLabel(int status) => switch (status) {
+    400 => ' (Server rejected the download request)',
     401 => ' (Unauthorized)',
     403 => ' (Forbidden or expired link)',
     404 => ' (Not Found)',
@@ -58,6 +61,12 @@ class DownloadFailureException implements Exception {
 
 abstract class DownloadService {
   bool get supportsResume => false;
+
+  int get maxConcurrentDownloads => 0x7fffffff;
+
+  Future<int?> availableBytes() async => null;
+
+  Future<void> checkAvailableSpace(int? expectedBytes) async {}
 
   /// Returns a readable local source, or null if the saved file is unavailable.
   /// Android also moves completed app-private files out of DownloadManager's
@@ -115,6 +124,30 @@ class AndroidSystemDownloadService extends DownloadService {
   static const _channel = MethodChannel('app.torbridge/downloads');
   final Map<String, String> _retentionWarnings = {};
   final Map<String, String> _downloadStatuses = {};
+
+  @override
+  int get maxConcurrentDownloads => 1;
+
+  @override
+  Future<int?> availableBytes() => _channel.invokeMethod<int>('availableBytes');
+
+  @override
+  Future<void> checkAvailableSpace(int? expectedBytes) async {
+    final available = await availableBytes();
+    if (available == null) {
+      throw StateError(
+        'Could not check download storage. Run Diagnostics and retry.',
+      );
+    }
+    // Metadata is an estimate; leave headroom for Android and other apps.
+    const reserve = 512 * 1024 * 1024;
+    final expected = expectedBytes != null && expectedBytes > 0
+        ? expectedBytes
+        : 0;
+    if (available < expected + reserve) {
+      throw DownloadStorageException(available, expected);
+    }
+  }
 
   @override
   String? downloadStatus(String jobId) => _downloadStatuses[jobId];
@@ -234,7 +267,10 @@ class AndroidSystemDownloadService extends DownloadService {
           return localPath;
         case 'failed':
           final reason = (status['reason'] as num?)?.toInt() ?? 1000;
-          throw DownloadFailureException(reason);
+          throw DownloadFailureException(
+            reason,
+            host: status['host'] as String?,
+          );
         case 'missing':
           throw StateError('Android no longer has this download.');
       }
@@ -259,6 +295,19 @@ class AndroidSystemDownloadService extends DownloadService {
       );
     }
   }
+}
+
+class DownloadStorageException implements Exception {
+  const DownloadStorageException(this.available, this.expected);
+
+  final int available;
+  final int expected;
+
+  @override
+  String toString() =>
+      'Not enough space for this download: ${(available / 1e9).toStringAsFixed(1)} GB available'
+      '${expected > 0 ? ', about ${(expected / 1e9).toStringAsFixed(1)} GB needed' : ''}'
+      ', plus 0.5 GB reserved for Android. Free space or choose a smaller file, then retry.';
 }
 
 class DioDownloadService extends DownloadService {

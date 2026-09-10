@@ -32,6 +32,7 @@ import 'package:torbridge/services/stremio_bridge_service.dart';
 
 void main() {
   auditProbes();
+  downloadRecoveryRegressions();
   for (final schema in [2, 3]) {
     test(
       'saved error migration distinguishes old and new records: $schema',
@@ -338,7 +339,7 @@ void main() {
     expect(controller.state.downloads, isEmpty);
   });
 
-  for (final reason in [502, 1008]) {
+  for (final reason in [400, 502, 1008]) {
     test('Android failure $reason retries with a fresh TorBox link', () async {
       final downloads = _RetryingDownloadService(reason);
       final credentials = _MemoryCredentials()
@@ -1670,6 +1671,326 @@ class _AuditHttpAdapter implements HttpClientAdapter {
 
   @override
   void close({bool force = false}) {}
+}
+
+Map<String, dynamic> _savedTransfer(String id, {String? platformId}) => {
+  'schema': 3,
+  'id': id,
+  'title': 'Fixture $id',
+  'status': platformId == null ? 'queued' : 'downloading',
+  'platformId': platformId,
+  'progress': 0,
+  'mediaTitle': {'id': 'fixture-$id', 'type': 'movie', 'name': 'Fixture $id'},
+  'source': {
+    'id': id,
+    'addonName': 'Fixture',
+    'displayName': 'fixture.mp4',
+    'description': '',
+    'infoHash': '0123456789abcdef0123456789abcdef01234567',
+    'sizeBytes': 500000000,
+  },
+};
+
+class _SerialFixtureDownloads extends _RecordingDownloadService {
+  final transfers = <String, Completer<String>>{};
+  final restored = <String, Completer<String>>{};
+  int? resumeFailure;
+  bool hasSpace = true;
+  @override
+  bool get supportsResume => true;
+  @override
+  int get maxConcurrentDownloads => 1;
+  @override
+  Future<void> checkAvailableSpace(int? expectedBytes) async {
+    if (!hasSpace) throw DownloadStorageException(100, expectedBytes ?? 0);
+  }
+
+  @override
+  Future<String> resume({
+    required String jobId,
+    required String platformId,
+    required DownloadProgressCallback onProgress,
+  }) async {
+    if (resumeFailure != null) throw DownloadFailureException(resumeFailure!);
+    return (restored[jobId] = Completer<String>()).future;
+  }
+
+  @override
+  Future<String> download({
+    required String jobId,
+    required Uri url,
+    required String suggestedName,
+    required DownloadProgressCallback onProgress,
+    DownloadEnqueuedCallback? onEnqueued,
+    Map<String, String> requestHeaders = const {},
+  }) {
+    urls.add(url);
+    onEnqueued?.call('new-$jobId');
+    return (transfers[jobId] = Completer<String>()).future;
+  }
+}
+
+class _StorageDuringRecovery extends _RecordingDownloadService {
+  final cancelled = <String?>[];
+  int finalFailure = 1006;
+  @override
+  Future<String> download({
+    required String jobId,
+    required Uri url,
+    required String suggestedName,
+    required DownloadProgressCallback onProgress,
+    DownloadEnqueuedCallback? onEnqueued,
+    Map<String, String> requestHeaders = const {},
+  }) async {
+    urls.add(url);
+    onEnqueued?.call('attempt-${urls.length}');
+    throw DownloadFailureException(
+      urls.length == 1 ? 400 : finalFailure,
+      host: url.host,
+    );
+  }
+
+  @override
+  Future<void> cancel({required String jobId, String? platformId}) async {
+    cancelled.add(platformId);
+  }
+}
+
+void downloadRecoveryRegressions() {
+  test('persistent HTTP 400 stops after bounded recovery and names the attempted host', () async {
+    final service = _StorageDuringRecovery()..finalFailure = 400;
+    final credentials = _MemoryCredentials()
+      ..value = const StoredConnections(
+        aioManifestUrl: 'https://aio.example/manifest.json',
+        torBoxToken: 'token',
+      );
+    final controller = TorBridgeController(
+      service,
+      _FakeBridge(),
+      credentials,
+      CinemetaClient(),
+      _RefreshingAioStreamsClient(),
+      _MemoryStateStore(),
+      (_) => _FakeTorBoxClient(),
+    );
+    addTearDown(controller.dispose);
+    await controller.initialize();
+    await controller.downloadCandidate(_fallbackCandidate);
+    expect(service.urls, hasLength(3));
+    expect(controller.state.downloads.single.status, DownloadStatus.failed);
+    expect(controller.state.downloads.single.error, contains('HTTP 400'));
+    expect(
+      controller.state.downloads.single.error,
+      endsWith('from torbox.example'),
+    );
+  });
+
+  testWidgets('many failed restored transfers recover one at a time', (
+    tester,
+  ) async {
+    final service = _SerialFixtureDownloads()..resumeFailure = 400;
+    final store = _MemoryStateStore()
+      ..value = StoredLocalState(
+        downloadRecords: [
+          _savedTransfer('old1', platformId: '101'),
+          _savedTransfer('old2', platformId: '102'),
+        ],
+      );
+    final credentials = _MemoryCredentials()
+      ..value = const StoredConnections(torBoxToken: 'token');
+    final controller = TorBridgeController(
+      service,
+      _FakeBridge(),
+      credentials,
+      CinemetaClient(),
+      AioStreamsClient(),
+      store,
+      (_) => _FakeTorBoxClient(),
+    );
+    await controller.initialize();
+    await tester.pump();
+    expect(service.transfers.keys, ['old1']);
+    expect(controller.state.downloads.last.status, DownloadStatus.queued);
+    service.transfers['old1']!.complete('/old1.mp4');
+    await tester.pump();
+    expect(service.transfers.keys, ['old1', 'old2']);
+    service.transfers['old2']!.complete('/old2.mp4');
+    await tester.pump();
+    expect(
+      controller.state.downloads.every(
+        (j) => j.status == DownloadStatus.complete,
+      ),
+      isTrue,
+    );
+    controller.dispose();
+  });
+
+  for (final reason in [400, 1008]) {
+    testWidgets(
+      'restored Android failure $reason recovers after credentials load',
+      (tester) async {
+        final service = _SerialFixtureDownloads()..resumeFailure = reason;
+        final store = _MemoryStateStore()
+          ..value = StoredLocalState(
+            downloadRecords: [_savedTransfer('saved', platformId: 'old-id')],
+          );
+        final credentials = _MemoryCredentials()
+          ..value = const StoredConnections(torBoxToken: 'token');
+        final controller = TorBridgeController(
+          service,
+          _FakeBridge(),
+          credentials,
+          CinemetaClient(),
+          AioStreamsClient(),
+          store,
+          (_) => _FakeTorBoxClient(),
+        );
+        await controller.initialize();
+        await tester.pump();
+        expect(service.urls, [Uri.parse('https://torbox.example/fresh')]);
+        service.transfers['saved']!.complete('/fixture.mp4');
+        await tester.pump();
+        expect(
+          controller.state.downloads.single.status,
+          DownloadStatus.complete,
+        );
+        expect(controller.state.downloads.single.platformId, 'new-saved');
+        controller.dispose();
+      },
+    );
+  }
+
+  testWidgets(
+    'saved Android queue serializes transfers, cancels waiting jobs and rechecks space',
+    (tester) async {
+      final service = _SerialFixtureDownloads();
+      final store = _MemoryStateStore()
+        ..value = StoredLocalState(
+          downloadRecords: [
+            _savedTransfer('first'),
+            _savedTransfer('cancelled'),
+            _savedTransfer('last'),
+          ],
+        );
+      final credentials = _MemoryCredentials()
+        ..value = const StoredConnections(torBoxToken: 'token');
+      final controller = TorBridgeController(
+        service,
+        _FakeBridge(),
+        credentials,
+        CinemetaClient(),
+        AioStreamsClient(),
+        store,
+        (_) => _FakeTorBoxClient(),
+      );
+      await controller.initialize();
+      await tester.pump();
+      expect(service.transfers.keys, ['first']);
+      expect(
+        controller.state.downloads.where(
+          (j) => j.status == DownloadStatus.queued,
+        ),
+        hasLength(2),
+      );
+      expect(
+        store.value.downloadRecords.where((j) => j['status'] == 'queued'),
+        hasLength(2),
+      );
+      await controller.cancelDownload(controller.state.downloads[1]);
+      service.hasSpace = false;
+      service.transfers['first']!.complete('/fixture.mp4');
+      await tester.pump();
+      expect(service.transfers.keys, ['first']);
+      expect(controller.state.downloads.last.status, DownloadStatus.failed);
+      expect(
+        controller.state.downloads.last.error,
+        contains('Not enough space'),
+      );
+      expect(service.deleted, isEmpty);
+      controller.dispose();
+    },
+  );
+
+  testWidgets('restored native transfers occupy queue slots until all finish', (
+    tester,
+  ) async {
+    final service = _SerialFixtureDownloads();
+    final store = _MemoryStateStore()
+      ..value = StoredLocalState(
+        downloadRecords: [
+          _savedTransfer('old1', platformId: '101'),
+          _savedTransfer('old2', platformId: '102'),
+          _savedTransfer('waiting'),
+        ],
+      );
+    final credentials = _MemoryCredentials()
+      ..value = const StoredConnections(torBoxToken: 'token');
+    final controller = TorBridgeController(
+      service,
+      _FakeBridge(),
+      credentials,
+      CinemetaClient(),
+      AioStreamsClient(),
+      store,
+      (_) => _FakeTorBoxClient(),
+    );
+    await controller.initialize();
+    await tester.pump();
+    expect(service.restored.keys, ['old1', 'old2']);
+    expect(service.transfers, isEmpty);
+    service.restored['old1']!.complete('/old1.mp4');
+    await tester.pump();
+    expect(service.transfers, isEmpty);
+    service.restored['old2']!.complete('/old2.mp4');
+    await tester.pump();
+    expect(service.transfers.keys, ['waiting']);
+    service.transfers['waiting']!.complete('/waiting.mp4');
+    await tester.pump();
+    expect(
+      controller.state.downloads.every(
+        (j) => j.status == DownloadStatus.complete,
+      ),
+      isTrue,
+    );
+    controller.dispose();
+  });
+
+  test(
+    'recovery stops on storage errors and preserves the failed native ID',
+    () async {
+      final service = _StorageDuringRecovery();
+      final credentials = _MemoryCredentials()
+        ..value = const StoredConnections(
+          aioManifestUrl: 'https://aio.example/manifest.json',
+          torBoxToken: 'token',
+        );
+      final torBox = _FakeTorBoxClient();
+      final controller = TorBridgeController(
+        service,
+        _FakeBridge(),
+        credentials,
+        CinemetaClient(),
+        _RefreshingAioStreamsClient(),
+        _MemoryStateStore(),
+        (_) => torBox,
+      );
+      addTearDown(controller.dispose);
+      await controller.initialize();
+      await controller.downloadCandidate(_fallbackCandidate);
+      expect(service.urls, hasLength(2));
+      expect(service.cancelled, ['attempt-1']);
+      expect(controller.state.downloads.single.platformId, 'attempt-2');
+      expect(
+        controller.state.downloads.single.error,
+        contains('insufficient storage'),
+      );
+      expect(
+        controller.state.downloads.single.error,
+        isNot(contains('from streams')),
+      );
+      expect(torBox.requestedFileId, isNull);
+    },
+  );
 }
 
 class _AuditTrakt extends TraktClient {

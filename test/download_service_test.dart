@@ -49,6 +49,31 @@ void main() {
   tearDown(() => messenger.setMockMethodCallHandler(channel, null));
 
   test(
+    'Android checks expected size and headroom without deleting anything',
+    () async {
+      var free = 6000000000;
+      final calls = <String>[];
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        calls.add(call.method);
+        return free;
+      });
+      final service = AndroidSystemDownloadService();
+      await service.checkAvailableSpace(4900000000);
+      free = 5000000000;
+      await expectLater(
+        service.checkAvailableSpace(4900000000),
+        throwsA(isA<DownloadStorageException>()),
+      );
+      free = 100000000;
+      await expectLater(
+        service.checkAvailableSpace(null),
+        throwsA(isA<DownloadStorageException>()),
+      );
+      expect(calls, everyElement('availableBytes'));
+    },
+  );
+
+  test(
     'Android waiting reasons are visible and clear when transfer progresses',
     () async {
       final states = <Map<String, Object>>[
