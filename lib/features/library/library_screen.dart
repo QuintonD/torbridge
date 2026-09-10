@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/app_state.dart';
 import '../../data/demo_catalog.dart';
+import '../../domain/watched_entry.dart';
 import '../common/artwork_image.dart';
 import '../common/page_header.dart';
 
@@ -14,16 +15,21 @@ class LibraryScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final state = ref.watch(torBridgeControllerProvider);
-    final watchedDownloads = state.downloads
-        .where((job) => state.watchedTitleIds.contains(job.videoId))
-        .toList(growable: false);
-    final watchedDemo = demoTitles
-        .where(
-          (title) =>
-              state.watchedTitleIds.contains(title.id) &&
-              !watchedDownloads.any((job) => job.videoId == title.id),
-        )
-        .toList(growable: false);
+    final entries = state.watchedTitleIds.map((id) {
+      final saved = state.watchedHistory[id];
+      if (saved != null && saved.title.name != saved.title.id) return saved;
+      final job = state.downloads.where((job) => job.videoId == id).firstOrNull;
+      if (job != null) {
+        return WatchedEntry(job.mediaTitle, video: job.mediaVideo);
+      }
+      final title = [
+        ...state.catalogTitles,
+        ...demoTitles,
+      ].where((title) => title.id == id).firstOrNull;
+      return title == null
+          ? saved ?? WatchedEntry.placeholder(id)
+          : WatchedEntry(title);
+    }).toList();
     return Padding(
       padding: const EdgeInsets.fromLTRB(24, 24, 24, 0),
       child: Column(
@@ -45,7 +51,7 @@ class LibraryScreen extends ConsumerWidget {
                 : null,
           ),
           const SizedBox(height: 22),
-          if (watchedDownloads.isEmpty && watchedDemo.isEmpty)
+          if (entries.isEmpty)
             const Expanded(
               child: SingleChildScrollView(
                 child: Padding(
@@ -72,30 +78,10 @@ class LibraryScreen extends ConsumerWidget {
           else
             Expanded(
               child: ListView.separated(
-                itemCount: watchedDownloads.length + watchedDemo.length,
+                itemCount: entries.length,
                 separatorBuilder: (_, _) => const SizedBox(height: 10),
                 itemBuilder: (context, index) {
-                  if (index >= watchedDownloads.length) {
-                    final title = watchedDemo[index - watchedDownloads.length];
-                    return Card(
-                      child: ListTile(
-                        leading: ClipOval(
-                          child: SizedBox(
-                            width: 42,
-                            height: 42,
-                            child: ArtworkImage(
-                              url: title.posterUrl,
-                              fallbackColor: Color(title.color),
-                            ),
-                          ),
-                        ),
-                        title: Text(title.name),
-                        subtitle: Text('${title.year} • ${title.genre}'),
-                        trailing: const Chip(label: Text('Watched')),
-                      ),
-                    );
-                  }
-                  final job = watchedDownloads[index];
+                  final entry = entries[index];
                   return Card(
                     child: ListTile(
                       leading: ClipRRect(
@@ -105,15 +91,19 @@ class LibraryScreen extends ConsumerWidget {
                           height: 48,
                           child: ArtworkImage(
                             url:
-                                job.mediaVideo?.thumbnailUrl ??
-                                job.mediaTitle.posterUrl,
-                            fallbackColor: Color(job.mediaTitle.color),
+                                entry.video?.thumbnailUrl ??
+                                entry.title.posterUrl,
+                            fallbackColor: Color(entry.title.color),
                           ),
                         ),
                       ),
-                      title: Text(job.title),
+                      title: Text(entry.label),
                       subtitle: Text(
-                        '${job.episodeLabel} • ${job.tags.join(' • ')}',
+                        [
+                          if (entry.title.year > 0) '${entry.title.year}',
+                          if (entry.video != null) entry.video!.code,
+                          'Watched',
+                        ].join(' \u00b7 '),
                       ),
                       trailing: const Chip(label: Text('Watched')),
                     ),

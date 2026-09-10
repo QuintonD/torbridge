@@ -164,26 +164,30 @@ class _CheckRow extends StatelessWidget {
   const _CheckRow({required this.name, required this.detail});
 
   final String name;
-  final String detail;
+  final DiagnosticCheck detail;
 
   @override
   Widget build(BuildContext context) {
-    final lower = detail.toLowerCase();
-    final problem =
-        lower.startsWith('failed') ||
-        RegExp(r'^\d+ of \d+ files are (missing|unavailable)')
-            .hasMatch(lower) ||
-        lower.contains('not responding');
     return ListTile(
       contentPadding: EdgeInsets.zero,
       leading: Icon(
-        problem ? Icons.error_outline : Icons.check_circle_outline,
-        color: problem
-            ? Theme.of(context).colorScheme.error
-            : const Color(0xFF75D6A4),
+        switch (detail.severity) {
+          DiagnosticSeverity.success => Icons.check_circle_outline,
+          DiagnosticSeverity.warning => Icons.warning_amber,
+          DiagnosticSeverity.error => Icons.error_outline,
+          DiagnosticSeverity.info => Icons.info_outline,
+        },
+        color: switch (detail.severity) {
+          DiagnosticSeverity.success => const Color(0xFF75D6A4),
+          DiagnosticSeverity.warning => const Color(0xFFFFC66D),
+          DiagnosticSeverity.error => Theme.of(context).colorScheme.error,
+          DiagnosticSeverity.info => Theme.of(
+            context,
+          ).colorScheme.onSurfaceVariant,
+        },
       ),
       title: Text(name),
-      subtitle: Text(detail),
+      subtitle: Text(detail.detail),
     );
   }
 }

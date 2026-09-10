@@ -1,9 +1,41 @@
 # Application audit — 10 September 2026
 
-Reviewed release **1.2.10**, source commit
-[`640efa7`](https://github.com/QuintonD/torbridge/commit/640efa7), after publishing
-the Android recovery update. This is an investigation, not a claim that the
-following issues are fixed. The published APKs have not been replaced.
+The audit below records failures reproduced in **1.2.10**, source
+[`640efa7`](https://github.com/QuintonD/torbridge/commit/640efa7).
+**All ten issue groups and the additional inspection findings are addressed in
+[1.2.11](https://github.com/QuintonD/torbridge/releases/tag/v1.2.11).** The original
+1.2.10 binaries remain unchanged.
+
+## Resolution in 1.2.11
+
+- A01: initial and recovery TorBox series downloads verify numeric episode
+  identity in the filename, including when a source supplies an incorrect index.
+- A02: Windows transfers atomically reserve separate attempt directories;
+  concurrent same-name tests verify distinct paths and intact response bytes.
+- A03: preferences, downloads, watched IDs, and history load independently.
+  Unreadable sections are backed up; unreadable download lists cannot be replaced,
+  and malformed individual records remain in subsequent saves.
+- A04: cancel/delete resolve the current job and wait for an in-flight enqueue
+  before retiring its native ID. Failed removal retains the record.
+- A05/A06: completion updates local history before Trakt requests. Title and
+  episode metadata survive file removal and restart; imported Trakt history and
+  legacy ID-only entries are visible in Library. Explicit local watched/unwatched
+  choices take precedence over remote snapshots.
+- A07: superseded and cleared searches cannot publish late results; catalog
+  requests have timeouts.
+- A08/A09/A10: negative cache labels take precedence, binary units use binary
+  multipliers, and HDR10+ retains its format.
+- Additional findings: watched changes target the supplied movie/episode and use
+  the correct add/remove endpoint in order; device authorization polls do not
+  overlap and increase the delay on slowdown; Trakt requests have timeouts.
+  Diagnostics use explicit severity, player separators are corrected, and Windows
+  build/update scripts derive versions and copy the complete bundle with backup.
+  Native command exit codes determine packaging success.
+- Follow-up finding: watched sync now follows short Trakt pages until completion
+  instead of assuming the requested page size was honored. This matches
+  [Trakt's pagination guidance](https://github.com/trakt/trakt-api/discussions/775).
+
+The release notes record final validation and device-testing limits.
 
 ## Results
 
@@ -110,11 +142,11 @@ positive and negative examples so fixes do not simply invert the errors.
 
 ## Additional findings from code inspection
 
-- **P2 — Mark unwatched sends a watched update to Trakt.**
+- **P2 — Mark unwatched leaves Trakt history unchanged.**
   [`toggleWatched`](https://github.com/QuintonD/torbridge/blob/640efa7/lib/app/app_state.dart#L482)
-  invokes `_markSelectedWatched()` for both adding and removing a watched ID.
-  That helper always calls the history-add endpoint and uses the current Discover
-  selection rather than the passed ID. Use an explicit target plus add/remove
+  only invokes `_markSelectedWatched()` when adding a watched ID; removing an ID
+  never calls the history-remove endpoint. The add helper also uses the current
+  Discover selection rather than the passed ID. Use an explicit target plus add/remove
   action. No live Trakt account was changed to test this.
 - **P2 — Trakt authorization can overlap requests and ignores backoff.**
   [`Timer.periodic`](https://github.com/QuintonD/torbridge/blob/640efa7/lib/features/settings/settings_screen.dart#L1069)
@@ -146,15 +178,17 @@ positive and negative examples so fixes do not simply invert the errors.
 .\tool\audit_app.ps1
 ```
 
-This explicit audit runner creates a temporary test in `.dart_tool`, reuses the
-existing fake services, and runs only cases prefixed `AUDIT`. On the reviewed
-commit its expected result is **11 failed assertions**, not a successful exit.
-The [probe definitions](../tool/audit/2026-09-10-probes.dart.txt) assert the desired
-behavior and can become normal regression tests as the issues are repaired.
-It uses mocked state/network responses and a disposable temporary directory;
-it does not read personal credentials or modify a real media library.
+The runner now executes the `AUDIT` regression cases in
+[`test/app_state_test.dart`](../test/app_state_test.dart). The original eleven
+probes are part of the normal passing release suite, alongside additional race,
+metadata persistence, parser, and Trakt tests. Historical probe definitions remain
+in [`tool/audit/2026-09-10-probes.dart.txt`](../tool/audit/2026-09-10-probes.dart.txt);
+on the original audit commit `8c8fc6b`, the historical runner reproduced eleven
+failed assertions. Fixtures use mocked state and network responses and disposable
+files; no personal credentials or real media library are used.
 
-The release test suite remains separate: `flutter test test`.
+Run all checks with `tool/test.ps1`, and packaging fixtures with
+`tool/test_release_tools.ps1`.
 
 ## Scope and next steps
 
@@ -165,6 +199,6 @@ existing transfer and streaming tests were considered; this was not a penetratio
 test or exhaustive codec/device compatibility review. No physical Pixel was
 available, and no live account was used for these probes.
 
-Repair A01–A03 first, then cancellation and watched-state handling. Preserve the
-1.2.10 release bytes and publish a newly versioned update after fixes and relevant
-host/native regressions pass.
+The findings above are repaired in 1.2.11. Device/provider-specific networking
+and codec compatibility remain bounded by the release validation; this report
+is not a claim that every possible application defect has been eliminated.

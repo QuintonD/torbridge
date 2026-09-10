@@ -326,13 +326,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                             : [option.$2, option.$3]
                                   .whereType<String>()
                                   .where((v) => v.isNotEmpty)
-                                  .join(' ? ')
+                                  .join(' \u00b7 ')
                                   .isEmpty
                             ? 'Track ${option.$1}'
                             : [option.$2, option.$3]
                                   .whereType<String>()
                                   .where((v) => v.isNotEmpty)
-                                  .join(' ? '),
+                                  .join(' \u00b7 '),
                       ),
                       onTap: () async {
                         try {

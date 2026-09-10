@@ -8,6 +8,7 @@ import 'package:qr_flutter/qr_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../app/app_state.dart';
+import '../../services/trakt_device_poller.dart';
 import '../../domain/media_models.dart';
 import '../../integrations/trakt_client.dart';
 import '../../services/credential_store.dart';
@@ -990,7 +991,8 @@ class _TraktDeviceDialog extends ConsumerStatefulWidget {
 
 class _TraktDeviceDialogState extends ConsumerState<_TraktDeviceDialog> {
   TraktDeviceCode? _code;
-  Timer? _timer;
+  TraktDevicePoller? _poller;
+  bool _requesting = true;
   String _status = 'Requesting a device code…';
 
   @override
@@ -1001,7 +1003,7 @@ class _TraktDeviceDialogState extends ConsumerState<_TraktDeviceDialog> {
 
   @override
   void dispose() {
-    _timer?.cancel();
+    _poller?.stop();
     super.dispose();
   }
 
@@ -1028,7 +1030,7 @@ class _TraktDeviceDialogState extends ConsumerState<_TraktDeviceDialog> {
             ),
             const SizedBox(height: 12),
             Text(_status, textAlign: TextAlign.center),
-            if (code == null) ...[
+            if (_requesting) ...[
               const SizedBox(height: 14),
               const CircularProgressIndicator(),
             ],
@@ -1063,53 +1065,56 @@ class _TraktDeviceDialogState extends ConsumerState<_TraktDeviceDialog> {
       if (!mounted) return;
       setState(() {
         _code = code;
+        _requesting = false;
         _status = 'Waiting for approval at ${code.verificationUrl.host}';
       });
-      final interval = Duration(seconds: code.interval.clamp(5, 60));
-      _timer = Timer.periodic(interval, (_) => unawaited(_poll()));
+      _poller = TraktDevicePoller(
+        code: code,
+        poll: ref
+            .read(torBridgeControllerProvider.notifier)
+            .pollTraktDeviceCode,
+        onResult: _onPollResult,
+        onError: (error) {
+          if (mounted) {
+            setState(() => _status = 'Authorization check failed: $error');
+          }
+        },
+      )..start();
     } catch (error) {
       if (mounted) {
-        setState(() => _status = 'Could not start authorization: $error');
+        setState(() {
+          _requesting = false;
+          _status = 'Could not start authorization: $error';
+        });
       }
     }
   }
 
-  Future<void> _poll() async {
-    final code = _code;
-    if (code == null || !mounted) return;
-    try {
-      final result = await ref
-          .read(torBridgeControllerProvider.notifier)
-          .pollTraktDeviceCode(code.deviceCode);
-      if (!mounted) return;
-      switch (result.status) {
-        case TraktDeviceStatus.approved:
-          _timer?.cancel();
-          Navigator.pop(context);
-          return;
-        case TraktDeviceStatus.pending:
-          setState(() => _status = 'Waiting for approval…');
-          return;
-        case TraktDeviceStatus.slowDown:
-          setState(() => _status = 'Trakt asked us to wait a little longer…');
-          return;
-        case TraktDeviceStatus.expired:
-          _timer?.cancel();
-          setState(() => _status = 'This code expired. Close and try again.');
-          return;
-        case TraktDeviceStatus.denied:
-          _timer?.cancel();
-          setState(() => _status = 'Authorization was denied.');
-          return;
-        case TraktDeviceStatus.invalid:
-          _timer?.cancel();
-          setState(() => _status = 'This code is no longer valid.');
-          return;
-      }
-    } catch (error) {
-      if (mounted) {
-        setState(() => _status = 'Authorization check failed: $error');
-      }
+  void _onPollResult(TraktDevicePollResult result) {
+    if (!mounted) return;
+    switch (result.status) {
+      case TraktDeviceStatus.approved:
+        _poller?.stop();
+        Navigator.pop(context);
+        return;
+      case TraktDeviceStatus.pending:
+        setState(() => _status = 'Waiting for approval…');
+        return;
+      case TraktDeviceStatus.slowDown:
+        setState(() => _status = 'Trakt asked us to wait a little longer…');
+        return;
+      case TraktDeviceStatus.expired:
+        _poller?.stop();
+        setState(() => _status = 'This code expired. Close and try again.');
+        return;
+      case TraktDeviceStatus.denied:
+        _poller?.stop();
+        setState(() => _status = 'Authorization was denied.');
+        return;
+      case TraktDeviceStatus.invalid:
+        _poller?.stop();
+        setState(() => _status = 'This code is no longer valid.');
+        return;
     }
   }
 }

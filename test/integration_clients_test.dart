@@ -9,6 +9,87 @@ import 'package:torbridge/integrations/torbox_client.dart';
 import 'package:torbridge/integrations/trakt_client.dart';
 
 void main() {
+  test(
+    'Trakt short pages still load subsequent history and title metadata',
+    () async {
+      final dio = Dio(BaseOptions(baseUrl: 'https://api.trakt.tv'));
+      final adapter = DioAdapter(dio: dio);
+      for (var page = 1; page <= 3; page++) {
+        adapter.onGet(
+          '/sync/watched/movies',
+          (server) => server.reply(
+            200,
+            page == 3
+                ? []
+                : [
+                    {
+                      'movie': {
+                        'title': 'Movie $page',
+                        'year': 2026,
+                        'ids': {'imdb': 'tt000000$page'},
+                      },
+                    },
+                  ],
+          ),
+          queryParameters: {'page': page, 'limit': 100},
+        );
+      }
+      adapter.onGet(
+        '/sync/watched/shows',
+        (server) => server.reply(200, []),
+        queryParameters: {'extended': 'progress', 'page': 1, 'limit': 100},
+      );
+      final history = await TraktClient(
+        clientId: 'fixture',
+        clientSecret: 'fixture',
+        apiDio: dio,
+      ).watchedHistory('fixture');
+      expect(history.keys, ['tt0000001', 'tt0000002']);
+      expect(history['tt0000002']?.title.name, 'Movie 2');
+    },
+  );
+
+  test('Trakt mark unwatched calls removal with the exact episode', () async {
+    final dio = Dio(BaseOptions(baseUrl: 'https://api.trakt.tv'));
+    final adapter = DioAdapter(dio: dio);
+    adapter.onPost(
+      '/sync/history/remove',
+      (server) => server.reply(200, {}),
+      data: {
+        'shows': [
+          {
+            'title': 'Fixture show',
+            'year': 2026,
+            'ids': {'imdb': 'tt1234567'},
+            'seasons': [
+              {
+                'number': 2,
+                'episodes': [
+                  {'number': 3},
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    );
+    await TraktClient(
+      clientId: 'fixture',
+      clientSecret: 'fixture',
+      apiDio: dio,
+    ).markWatched(
+      accessToken: 'fixture',
+      watched: false,
+      media: const TraktMedia.episode(
+        title: 'Fixture show',
+        year: 2026,
+        imdbId: 'tt1234567',
+        season: 2,
+        episode: 3,
+      ),
+    );
+  });
+
   test('Cinemeta details expose exact season and episode metadata', () async {
     final dio = Dio(BaseOptions(baseUrl: 'https://v3-cinemeta.strem.io'));
     final adapter = DioAdapter(dio: dio);
@@ -329,6 +410,8 @@ void main() {
       (server) => server.reply(200, [
         {
           'movie': {
+            'title': 'Fixture movie',
+            'year': 2026,
             'ids': {'imdb': 'tt1254207'},
           },
         },
@@ -356,6 +439,17 @@ void main() {
       queryParameters: {'extended': 'progress', 'page': 1, 'limit': 100},
     );
 
+    for (final type in ['movies', 'shows']) {
+      adapter.onGet(
+        '/sync/watched/$type',
+        (server) => server.reply(200, []),
+        queryParameters: {
+          if (type == 'shows') 'extended': 'progress',
+          'page': 2,
+          'limit': 100,
+        },
+      );
+    }
     final watched = await TraktClient(
       clientId: 'client-id',
       clientSecret: 'client-secret',

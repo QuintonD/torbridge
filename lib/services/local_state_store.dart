@@ -11,8 +11,14 @@ class StoredLocalState {
     ),
     this.watchedTitleIds = const {},
     this.downloadRecords = const [],
+    this.historyRecords = const [],
+    this.recoveryWarnings = const [],
+    this.downloadsReadable = true,
   });
 
+  final List<Map<String, dynamic>> historyRecords;
+  final List<String> recoveryWarnings;
+  final bool downloadsReadable;
   final DownloadPreferences preferences;
   final Set<String> watchedTitleIds;
   final List<Map<String, dynamic>> downloadRecords;
@@ -25,6 +31,8 @@ abstract class LocalStateStore {
 
   Future<void> saveWatched(Set<String> titleIds);
 
+  Future<void> saveHistory(List<Map<String, dynamic>> records);
+
   Future<void> saveDownloadRecords(List<Map<String, dynamic>> records);
 }
 
@@ -32,28 +40,82 @@ class SharedPreferencesLocalStateStore implements LocalStateStore {
   static const _preferencesKey = 'download_preferences_v1';
   static const _watchedKey = 'watched_title_ids_v1';
   static const _downloadsKey = 'completed_downloads_v1';
+  static const _historyKey = 'watched_history_v1';
+  bool _downloadsReadable = true;
 
   @override
   Future<StoredLocalState> read() async {
     final storage = await SharedPreferences.getInstance();
-    final preferencesJson = storage.getString(_preferencesKey);
-    final preferences = preferencesJson == null
-        ? const StoredLocalState().preferences
-        : _preferencesFromJson(
-            Map<String, dynamic>.from(jsonDecode(preferencesJson) as Map),
+    final warnings = <String>[];
+    Future<T> section<T>(String key, T fallback, T Function() decode) async {
+      try {
+        return decode();
+      } catch (_) {
+        final raw = storage.get(key);
+        final backupKey = '${key}_recovery_backup';
+        if (raw != null && !storage.containsKey(backupKey)) {
+          final saved = await storage.setString(
+            backupKey,
+            raw is String ? raw : jsonEncode(raw),
           );
-    final downloadsJson = storage.getString(_downloadsKey);
-    final downloadsValue = downloadsJson == null
-        ? const <Object?>[]
-        : jsonDecode(downloadsJson) as List;
+          if (!saved) throw StateError('Could not back up $key');
+        }
+        warnings.add('$key could not be read; the original was preserved.');
+        if (key == _downloadsKey) _downloadsReadable = false;
+        return fallback;
+      }
+    }
+
+    List<Map<String, dynamic>> records(String key) {
+      final raw = storage.getString(key);
+      if (raw == null) return [];
+      return (jsonDecode(raw) as List)
+          .map((item) => Map<String, dynamic>.from(item as Map))
+          .toList();
+    }
+
+    _downloadsReadable = true;
+    final preferences = await section(
+      _preferencesKey,
+      const StoredLocalState().preferences,
+      () {
+        final raw = storage.getString(_preferencesKey);
+        return raw == null
+            ? const StoredLocalState().preferences
+            : _preferencesFromJson(
+                Map<String, dynamic>.from(jsonDecode(raw) as Map),
+              );
+      },
+    );
+    final downloads = await section(
+      _downloadsKey,
+      <Map<String, dynamic>>[],
+      () => records(_downloadsKey),
+    );
+    final watched = await section(
+      _watchedKey,
+      <String>{},
+      () => storage.getStringList(_watchedKey)?.toSet() ?? {},
+    );
+    final history = await section(
+      _historyKey,
+      <Map<String, dynamic>>[],
+      () => records(_historyKey),
+    );
     return StoredLocalState(
       preferences: preferences,
-      watchedTitleIds: storage.getStringList(_watchedKey)?.toSet() ?? const {},
-      downloadRecords: downloadsValue
-          .whereType<Map>()
-          .map((record) => Map<String, dynamic>.from(record))
-          .toList(growable: false),
+      downloadRecords: downloads,
+      watchedTitleIds: watched,
+      historyRecords: history,
+      recoveryWarnings: warnings,
+      downloadsReadable: _downloadsReadable,
     );
+  }
+
+  @override
+  Future<void> saveHistory(List<Map<String, dynamic>> records) async {
+    final storage = await SharedPreferences.getInstance();
+    await storage.setString(_historyKey, jsonEncode(records));
   }
 
   @override
@@ -75,6 +137,11 @@ class SharedPreferencesLocalStateStore implements LocalStateStore {
   @override
   Future<void> saveDownloadRecords(List<Map<String, dynamic>> records) async {
     final storage = await SharedPreferences.getInstance();
+    if (!_downloadsReadable) {
+      throw StateError(
+        'Download records are protected because they could not be read.',
+      );
+    }
     await storage.setString(_downloadsKey, jsonEncode(records));
   }
 

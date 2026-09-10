@@ -1,5 +1,7 @@
 import 'package:dio/dio.dart';
 
+import '../domain/episode_identity.dart';
+
 class TorBoxApiException implements Exception {
   const TorBoxApiException(this.message);
 
@@ -37,33 +39,28 @@ class TorBoxTorrent {
 
   TorBoxFile? preferredFile([int? sourceFileIndex]) {
     if (sourceFileIndex != null && sourceFileIndex >= 0) {
-      if (sourceFileIndex < files.length) return files[sourceFileIndex];
+      if (sourceFileIndex < files.length && files[sourceFileIndex].isVideo) {
+        return files[sourceFileIndex];
+      }
       for (final file in files) {
-        if (file.id == sourceFileIndex) return file;
+        if (file.id == sourceFileIndex && file.isVideo) return file;
       }
     }
     final videoFiles = files.where((file) => file.isVideo).toList()
       ..sort((a, b) => b.size.compareTo(a.size));
     if (videoFiles.isNotEmpty) return videoFiles.first;
-    return files.isEmpty ? null : files.first;
+    return null;
   }
 
   TorBoxFile? episodeFile(String episodeCode, [int? sourceFileIndex]) {
-    if (sourceFileIndex != null) return preferredFile(sourceFileIndex);
-    final normalizedCode = episodeCode.toLowerCase();
-    final match = RegExp(r's(\d{1,3})e(\d{1,4})').firstMatch(normalizedCode);
-    final alternatives = <String>{normalizedCode};
-    if (match != null) {
-      final season = int.parse(match.group(1)!);
-      final episode = int.parse(match.group(2)!);
-      alternatives.addAll({
-        's${season.toString().padLeft(2, '0')}e${episode.toString().padLeft(2, '0')}',
-        '${season}x${episode.toString().padLeft(2, '0')}',
-      });
+    if (sourceFileIndex != null) {
+      final indexed = preferredFile(sourceFileIndex);
+      if (indexed != null && matchesEpisode(indexed.name, episodeCode)) {
+        return indexed;
+      }
     }
     for (final file in files.where((item) => item.isVideo)) {
-      final name = file.name.toLowerCase();
-      if (alternatives.any(name.contains)) return file;
+      if (matchesEpisode(file.name, episodeCode)) return file;
     }
     return null;
   }
@@ -276,14 +273,13 @@ class TorBoxClient {
     final torrents = await listTorrents(bypassCache: true);
     final titleTokens = _searchTokens(title);
     final requiredTitleMatches = titleTokens.length > 1 ? 2 : 1;
-    final episodeTokens = _episodeTokens(episodeCode);
     TorBoxFileSelection? best;
     var bestScore = -1;
 
     for (final torrent in torrents) {
       for (final file in torrent.files.where((item) => item.isVideo)) {
         final haystack = _normalized('${torrent.name} ${file.name}');
-        if (episodeTokens.isNotEmpty && !episodeTokens.any(haystack.contains)) {
+        if (episodeCode != null && !matchesEpisode(file.name, episodeCode)) {
           continue;
         }
         final titleMatches = titleTokens.where(haystack.contains).length;
@@ -291,7 +287,7 @@ class TorBoxClient {
           continue;
         }
         var score = titleMatches * 20;
-        if (episodeTokens.isNotEmpty) score += 100;
+        if (episodeCode != null) score += 100;
         if (year != null && haystack.contains('$year')) score += 5;
         if (file.size > 0) score += 1;
         if (score > bestScore ||
@@ -398,21 +394,6 @@ class TorBoxClient {
         (token) => token.length >= 3 && !_ignoredTitleTokens.contains(token),
       )
       .toSet();
-
-  Set<String> _episodeTokens(String? episodeCode) {
-    if (episodeCode == null) return const {};
-    final match = RegExp(
-      r's(\d{1,3})e(\d{1,4})',
-      caseSensitive: false,
-    ).firstMatch(episodeCode);
-    if (match == null) return {_normalized(episodeCode).replaceAll(' ', '')};
-    final season = int.parse(match.group(1)!);
-    final episode = int.parse(match.group(2)!);
-    return {
-      's${season.toString().padLeft(2, '0')}e${episode.toString().padLeft(2, '0')}',
-      '${season}x${episode.toString().padLeft(2, '0')}',
-    };
-  }
 
   String _normalized(String value) =>
       value.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), ' ').trim();

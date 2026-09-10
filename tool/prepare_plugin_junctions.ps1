@@ -3,6 +3,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'native_command.ps1')
 $projectRoot = Split-Path -Parent $PSScriptRoot
 
 if ([string]::IsNullOrWhiteSpace($Flutter)) {
@@ -23,9 +24,9 @@ if (-not (Test-Path -LiteralPath $Flutter)) {
 
 Push-Location $projectRoot
 try {
-    & $Flutter pub get
+    Invoke-NativeCommand -Executable $Flutter -Arguments @('pub', 'get') -AllowFailure
     $metadataPath = Join-Path $projectRoot '.flutter-plugins-dependencies'
-    $pubGetNeedsRetry = $LASTEXITCODE -ne 0
+    $pubGetNeedsRetry = $NativeExitCode -ne 0
     if ($pubGetNeedsRetry -and -not (Test-Path -LiteralPath $metadataPath)) {
         throw 'flutter pub get failed before plugin metadata was generated.'
     }
@@ -46,8 +47,8 @@ try {
     }
 
     if ($pubGetNeedsRetry) {
-        & $Flutter pub get
-        if ($LASTEXITCODE -ne 0) {
+        Invoke-NativeCommand -Executable $Flutter -Arguments @('pub', 'get') -AllowFailure
+        if ($NativeExitCode -ne 0) {
             throw 'flutter pub get still failed after plugin junctions were prepared.'
         }
     }

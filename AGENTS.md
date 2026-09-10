@@ -19,6 +19,9 @@
 - Keep the repository landing page professional and current: prominent download
   links, platform/version labels, concise update steps, screenshots, changelog,
   and a clear route to report problems. Do not advertise an unpublished asset.
+- When a fix affects Windows, publish and verify the complete Windows ZIP too;
+  Android APKs do not deliver Windows changes. Run `tool/test_release_tools.ps1`
+  when changing packaging or update scripts.
 - Keep Windows and Android version labels accurate when their releases differ.
   An APK is both the Android installer and update file; do not invent a separate
   patch package or claim automatic updating unless implemented and verified.

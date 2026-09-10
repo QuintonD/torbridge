@@ -9,6 +9,7 @@ import 'package:uuid/uuid.dart';
 
 import '../data/demo_catalog.dart';
 import '../domain/catalog_title.dart';
+import '../domain/watched_entry.dart';
 import '../domain/media_models.dart';
 import '../domain/recommendation_engine.dart';
 import '../integrations/aio_streams_client.dart';
@@ -23,6 +24,14 @@ import '../services/stremio_bridge_service.dart';
 import '../services/playback_launcher.dart';
 
 enum DownloadStatus { queued, downloading, complete, failed, unavailable }
+
+enum DiagnosticSeverity { success, warning, error, info }
+
+class DiagnosticCheck {
+  const DiagnosticCheck(this.detail, this.severity);
+  final String detail;
+  final DiagnosticSeverity severity;
+}
 
 enum ConnectionPhase { idle, checking, ready, error }
 
@@ -165,6 +174,7 @@ class TorBridgeState {
     ),
     this.downloads = const [],
     this.watchedTitleIds = const {},
+    this.watchedHistory = const {},
     this.connections = const StoredConnections(),
     this.demoMode = true,
     this.busy = false,
@@ -184,12 +194,13 @@ class TorBridgeState {
   final DownloadPreferences preferences;
   final List<DownloadJob> downloads;
   final Set<String> watchedTitleIds;
+  final Map<String, WatchedEntry> watchedHistory;
   final StoredConnections connections;
   final bool demoMode;
   final bool busy;
   final ConnectionPhase connectionPhase;
   final BridgePhase bridgePhase;
-  final Map<String, String> diagnosticChecks;
+  final Map<String, DiagnosticCheck> diagnosticChecks;
   final DateTime? lastTraktSyncAt;
   final bool? stremioAvailable;
   final String? notice;
@@ -212,12 +223,13 @@ class TorBridgeState {
     DownloadPreferences? preferences,
     List<DownloadJob>? downloads,
     Set<String>? watchedTitleIds,
+    Map<String, WatchedEntry>? watchedHistory,
     StoredConnections? connections,
     bool? demoMode,
     bool? busy,
     ConnectionPhase? connectionPhase,
     BridgePhase? bridgePhase,
-    Map<String, String>? diagnosticChecks,
+    Map<String, DiagnosticCheck>? diagnosticChecks,
     Object? lastTraktSyncAt = _unchanged,
     Object? stremioAvailable = _unchanged,
     String? notice,
@@ -234,6 +246,7 @@ class TorBridgeState {
       preferences: preferences ?? this.preferences,
       downloads: downloads ?? this.downloads,
       watchedTitleIds: watchedTitleIds ?? this.watchedTitleIds,
+      watchedHistory: watchedHistory ?? this.watchedHistory,
       connections: connections ?? this.connections,
       demoMode: demoMode ?? this.demoMode,
       busy: busy ?? this.busy,
@@ -308,7 +321,12 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     this._aioStreamsClient,
     this._localStateStore, [
     TorBoxClient Function(String token)? torBoxClientFactory,
+    TraktClient Function(String clientId, String clientSecret)?
+    traktClientFactory,
   ]) : _torBoxClientFactory = torBoxClientFactory ?? TorBoxClient.new,
+       _traktClientFactory =
+           traktClientFactory ??
+           ((id, secret) => TraktClient(clientId: id, clientSecret: secret)),
        super(const TorBridgeState());
 
   final DownloadService _downloadService;
@@ -318,19 +336,77 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
   final AioStreamsClient _aioStreamsClient;
   final LocalStateStore _localStateStore;
   final TorBoxClient Function(String token) _torBoxClientFactory;
+  final TraktClient Function(String, String) _traktClientFactory;
+  final Map<String, Future<void>> _pendingEnqueues = {};
   final Uuid _uuid = const Uuid();
   Timer? _maintenanceTimer;
   Future<void> _downloadSaveTail = Future<void>.value();
   Future<void> _torBoxProvisionTail = Future<void>.value();
   final Set<String> _retryingDownloadIds = {};
+  final Set<String> _removingDownloadIds = {};
+  final List<Map<String, dynamic>> _unreadDownloadRecords = [];
+  bool _downloadsReadable = true;
+  int _searchGeneration = 0;
+  Future<void> _historySaveTail = Future<void>.value();
+  Future<void> _traktHistoryTail = Future<void>.value();
 
   Future<void> initialize() async {
+    _downloadsReadable = false;
     try {
       final local = await _localStateStore.read();
+      _downloadsReadable = local.downloadsReadable;
       final jobs = _jobsFromRecords(local.downloadRecords);
+      final history = <String, WatchedEntry>{};
+      for (final record in local.historyRecords) {
+        try {
+          final entry = WatchedEntry(
+            _titleFromJson(Map<String, dynamic>.from(record['title'] as Map)),
+            video: record['video'] is Map
+                ? _videoFromJson(
+                    Map<String, dynamic>.from(record['video'] as Map),
+                  )
+                : null,
+            localWatched: record['localWatched'] as bool?,
+          );
+          history[entry.id] = entry;
+        } catch (_) {
+          /* Legacy IDs remain visible through placeholders. */
+        }
+      }
+      for (final job in jobs) {
+        if (local.watchedTitleIds.contains(job.videoId)) {
+          history.putIfAbsent(
+            job.videoId,
+            () => WatchedEntry(
+              job.mediaTitle,
+              video: job.mediaVideo,
+              localWatched: true,
+            ),
+          );
+        }
+      }
+      for (final id in local.watchedTitleIds) {
+        history.putIfAbsent(id, () {
+          final entry = WatchedEntry.placeholder(id);
+          return WatchedEntry(
+            entry.title,
+            video: entry.video,
+            localWatched: true,
+          );
+        });
+      }
+      final watched = {...local.watchedTitleIds};
+      for (final entry in history.values) {
+        if (entry.localWatched == true) watched.add(entry.id);
+        if (entry.localWatched == false) watched.remove(entry.id);
+      }
       state = state.copyWith(
         preferences: local.preferences,
-        watchedTitleIds: local.watchedTitleIds,
+        watchedTitleIds: watched,
+        watchedHistory: history,
+        notice: local.recoveryWarnings.isEmpty
+            ? null
+            : local.recoveryWarnings.join(" "),
         downloads: jobs,
       );
       await checkDownloadedFiles();
@@ -439,13 +515,19 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
   }
 
   Future<void> searchCatalog(String query) async {
+    final generation = ++_searchGeneration;
     if (query.trim().isEmpty) {
-      state = state.copyWith(catalogTitles: demoTitles, clearNotice: true);
+      state = state.copyWith(
+        catalogTitles: demoTitles,
+        busy: false,
+        clearNotice: true,
+      );
       return;
     }
     state = state.copyWith(busy: true, clearNotice: true);
     try {
       final results = await _cinemetaClient.search(query);
+      if (!mounted || generation != _searchGeneration) return;
       state = state.copyWith(
         busy: false,
         catalogTitles: results,
@@ -454,6 +536,7 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
       );
       if (results.isNotEmpty) selectTitle(results.first);
     } catch (error) {
+      if (!mounted || generation != _searchGeneration) return;
       state = state.copyWith(
         busy: false,
         notice: 'Catalogue search failed: $error',
@@ -479,19 +562,77 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     unawaited(removeExpiredWatchedDownloads());
   }
 
-  void toggleWatched(String videoId) {
+  WatchedEntry _historyTarget(String videoId) {
+    final job = state.downloads
+        .where((job) => job.videoId == videoId)
+        .firstOrNull;
+    if (job != null) return WatchedEntry(job.mediaTitle, video: job.mediaVideo);
+    if (videoId == state.selectedVideoId) {
+      return WatchedEntry(state.selectedTitle, video: state.selectedVideo);
+    }
+    final saved = state.watchedHistory[videoId];
+    if (saved != null) return saved;
+    for (final title in [...state.catalogTitles, ...demoTitles]) {
+      if (title.id == videoId) return WatchedEntry(title);
+      final video = title.videos
+          .where((item) => item.id == videoId)
+          .firstOrNull;
+      if (video != null) return WatchedEntry(title, video: video);
+    }
+    return WatchedEntry.placeholder(videoId);
+  }
+
+  Future<void> _setLocalWatched(WatchedEntry entry, bool adding) {
     final watched = {...state.watchedTitleIds};
-    final adding = !watched.contains(videoId);
-    adding ? watched.add(videoId) : watched.remove(videoId);
+    adding ? watched.add(entry.id) : watched.remove(entry.id);
     state = state.copyWith(
       watchedTitleIds: watched,
+      watchedHistory: {
+        ...state.watchedHistory,
+        entry.id: WatchedEntry(
+          entry.title,
+          video: entry.video,
+          localWatched: adding,
+        ),
+      },
       downloads: _downloadsWithWatchedState(watched),
     );
-    unawaited(_localStateStore.saveWatched(watched));
-    unawaited(_saveDownloads());
-    if (adding && state.connections.hasTraktSession) {
-      unawaited(_markSelectedWatched());
-    }
+    return _saveHistory();
+  }
+
+  Future<void> _saveHistory() {
+    final watched = {...state.watchedTitleIds};
+    final records = [
+      for (final entry in state.watchedHistory.values)
+        {
+          'title': _titleToJson(entry.title),
+          if (entry.video != null) 'video': _videoToJson(entry.video!),
+          'localWatched': entry.localWatched,
+        },
+    ];
+    final operation = _historySaveTail
+        .then((_) async {
+          await _localStateStore.saveHistory(records);
+          await _localStateStore.saveWatched(watched);
+          await _saveDownloads();
+        })
+        .catchError((Object error) {
+          if (mounted) {
+            state = state.copyWith(
+              notice: 'Could not save viewing history: $error',
+            );
+          }
+        });
+    return _historySaveTail = operation;
+  }
+
+  void toggleWatched(String videoId) {
+    final entry = _historyTarget(videoId);
+    final adding = !state.watchedTitleIds.contains(videoId);
+    unawaited(_setLocalWatched(entry, adding));
+    _traktHistoryTail = _traktHistoryTail.then(
+      (_) => _syncWatchedEntry(entry, adding),
+    );
     unawaited(removeExpiredWatchedDownloads());
   }
 
@@ -501,28 +642,24 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     required TraktScrobbleAction action,
     required double progress,
   }) async {
-    final connections = state.connections;
-    if (!connections.hasTraktSession || !title.id.startsWith('tt')) return;
+    if (action == TraktScrobbleAction.stop && progress >= 80) {
+      await _setLocalWatched(WatchedEntry(title, video: video), true);
+      await removeExpiredWatchedDownloads();
+    }
+    if (!mounted ||
+        !state.connections.hasTraktSession ||
+        !title.id.startsWith('tt')) {
+      return;
+    }
     try {
       await _withTraktSession(
-        (client, accessToken) => client.scrobble(
-          accessToken: accessToken,
+        (client, token) => client.scrobble(
+          accessToken: token,
           media: _traktMedia(title, video),
           action: action,
           progress: progress,
         ),
       );
-      if (action == TraktScrobbleAction.stop && progress >= 80 && mounted) {
-        final id = video?.id ?? title.id;
-        final watched = {...state.watchedTitleIds, id};
-        state = state.copyWith(
-          watchedTitleIds: watched,
-          downloads: _downloadsWithWatchedState(watched),
-        );
-        await _localStateStore.saveWatched(watched);
-        await _saveDownloads();
-        await removeExpiredWatchedDownloads();
-      }
     } catch (error) {
       if (mounted) {
         state = state.copyWith(notice: 'Trakt scrobble failed: $error');
@@ -627,9 +764,9 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     if (!connections.hasTraktApp) {
       throw StateError('Add a Trakt client ID and secret first.');
     }
-    return TraktClient(
-      clientId: connections.traktClientId!,
-      clientSecret: connections.traktClientSecret!,
+    return _traktClientFactory(
+      connections.traktClientId!,
+      connections.traktClientSecret!,
     ).requestDeviceCode();
   }
 
@@ -638,9 +775,9 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     if (!connections.hasTraktApp) {
       return const TraktDevicePollResult(TraktDeviceStatus.invalid);
     }
-    final client = TraktClient(
-      clientId: connections.traktClientId!,
-      clientSecret: connections.traktClientSecret!,
+    final client = _traktClientFactory(
+      connections.traktClientId!,
+      connections.traktClientSecret!,
     );
     final result = await client.pollDeviceToken(deviceCode);
     final tokens = result.tokens;
@@ -664,6 +801,12 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
   }
 
   Future<void> downloadCandidate(StreamCandidate source) async {
+    if (!_downloadsReadable) {
+      state = state.copyWith(
+        notice: 'Cannot add downloads while saved records are unreadable. The original records remain protected.',
+      );
+      return;
+    }
     final videoId = state.selectedVideoId;
     final existing = state.downloads.where(
       (item) =>
@@ -702,6 +845,16 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     CatalogTitle title,
     Iterable<CatalogVideo> selectedEpisodes,
   ) async {
+    if (!_downloadsReadable) {
+      state = state.copyWith(
+        notice: 'Cannot add downloads while saved records are unreadable. The original records remain protected.',
+      );
+      return const BulkDownloadResult(
+        queued: 0,
+        alreadyAdded: 0,
+        noEligibleSource: 0,
+      );
+    }
     final requested =
         <String, CatalogVideo>{
           for (final video in selectedEpisodes)
@@ -799,7 +952,7 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     );
     _replaceJob(job);
     try {
-      final url = await _downloadUrl(job.source).timeout(
+      final url = await _downloadUrl(job).timeout(
         const Duration(seconds: 60),
         onTimeout: () => throw StateError(
           'Getting the download link timed out. Retry the download.',
@@ -859,37 +1012,49 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     Uri url,
     void Function(DownloadJob updated) onJobChanged, {
     Map<String, String>? requestHeaders,
-  }) {
-    if (!mounted || !state.downloads.any((item) => item.id == job.id)) {
-      return Future.error(StateError('Download cancelled.'));
+  }) async {
+    if (!mounted ||
+        _removingDownloadIds.contains(job.id) ||
+        !state.downloads.any((item) => item.id == job.id)) {
+      throw StateError('Download cancelled.');
     }
     var current = job;
-    return _downloadService.download(
-      jobId: job.id,
-      url: url,
-      suggestedName: _downloadFilename(job),
-      requestHeaders: requestHeaders ?? job.source.requestHeaders,
-      onEnqueued: (platformId) {
-        if (!mounted || !state.downloads.any((item) => item.id == job.id)) {
-          unawaited(
-            _downloadService.cancel(jobId: job.id, platformId: platformId),
+    final enqueued = Completer<void>();
+    _pendingEnqueues[job.id] = enqueued.future;
+    try {
+      return await _downloadService.download(
+        jobId: job.id,
+        url: url,
+        suggestedName: _downloadFilename(job),
+        requestHeaders: requestHeaders ?? job.source.requestHeaders,
+        onEnqueued: (platformId) {
+          if (!mounted || !state.downloads.any((item) => item.id == job.id)) {
+            unawaited(
+              _downloadService.cancel(jobId: job.id, platformId: platformId),
+            );
+            return;
+          }
+          current = current.copyWith(platformId: platformId);
+          onJobChanged(current);
+          _replaceJob(current);
+          if (!enqueued.isCompleted) enqueued.complete();
+        },
+        onProgress: (received, total) {
+          final progress = total > 0 ? received / total : 0.0;
+          current = current.copyWith(
+            progress: progress.clamp(0, 1),
+            error: _downloadService.downloadStatus(job.id),
           );
-          return;
-        }
-        current = current.copyWith(platformId: platformId);
-        onJobChanged(current);
-        _replaceJob(current);
-      },
-      onProgress: (received, total) {
-        final progress = total > 0 ? received / total : 0.0;
-        current = current.copyWith(
-          progress: progress.clamp(0, 1),
-          error: _downloadService.downloadStatus(job.id),
-        );
-        onJobChanged(current);
-        _replaceJob(current, persist: false);
-      },
-    );
+          onJobChanged(current);
+          _replaceJob(current, persist: false);
+        },
+      );
+    } finally {
+      if (!enqueued.isCompleted) enqueued.complete();
+      if (identical(_pendingEnqueues[job.id], enqueued.future)) {
+        _pendingEnqueues.remove(job.id);
+      }
+    }
   }
 
   Future<String> _recoverRetryableDownload(
@@ -898,7 +1063,9 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     void Function(DownloadJob updated) onJobChanged,
   ) async {
     if (!originalError.isRetryableSourceFailure) throw originalError;
-    if (!mounted || !state.downloads.any((item) => item.id == job.id)) {
+    if (!mounted ||
+        _removingDownloadIds.contains(job.id) ||
+        !state.downloads.any((item) => item.id == job.id)) {
       throw StateError('Download cancelled.');
     }
     var current = job;
@@ -966,7 +1133,9 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
       onJobChanged(current);
       _replaceJob(current);
       try {
-        final alternativeUrl = await _downloadUrl(alternative);
+        final alternativeUrl = await _downloadUrl(
+          current.copyWith(source: alternative),
+        );
         return await _downloadFromUrl(current, alternativeUrl, (updated) {
           current = updated;
           onJobChanged(updated);
@@ -1032,7 +1201,11 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
           platformId: current.platformId,
         );
       }
-      if (!mounted || !state.downloads.any((item) => item.id == job.id)) return;
+      if (!mounted ||
+          _removingDownloadIds.contains(job.id) ||
+          !state.downloads.any((item) => item.id == job.id)) {
+        return;
+      }
       final refreshed = await _refreshSource(current);
       final latest = state.downloads
           .where((item) => item.id == job.id)
@@ -1066,34 +1239,60 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     }
   }
 
-  Future<void> cancelDownload(DownloadJob job) async {
-    await _downloadService.cancel(jobId: job.id, platformId: job.platformId);
-    state = state.copyWith(
-      downloads: state.downloads.where((item) => item.id != job.id).toList(),
-    );
-    await _saveDownloads();
-  }
+  Future<void> cancelDownload(DownloadJob job) =>
+      _removeDownload(job, deleteFile: false);
 
-  Future<void> deleteDownload(DownloadJob job, {bool automatic = false}) async {
-    final path = job.localPath;
+  Future<void> deleteDownload(DownloadJob job, {bool automatic = false}) =>
+      _removeDownload(job, deleteFile: true, automatic: automatic);
+
+  Future<void> _removeDownload(
+    DownloadJob snapshot, {
+    required bool deleteFile,
+    bool automatic = false,
+  }) async {
+    if (!_removingDownloadIds.add(snapshot.id)) return;
+    final job = state.downloads
+        .where((item) => item.id == snapshot.id)
+        .firstOrNull;
+    if (job == null) {
+      _removingDownloadIds.remove(snapshot.id);
+      return;
+    }
     try {
-      if (job.platformId != null) {
+      await _downloadService.cancel(jobId: job.id, platformId: job.platformId);
+      await _pendingEnqueues[job.id]?.timeout(const Duration(seconds: 30));
+      final latest =
+          state.downloads.where((item) => item.id == job.id).firstOrNull ?? job;
+      if (latest.platformId != job.platformId && latest.platformId != null) {
         await _downloadService.cancel(
-          jobId: job.id,
-          platformId: job.platformId,
+          jobId: latest.id,
+          platformId: latest.platformId,
         );
       }
-      if (path != null && path.isNotEmpty) await _downloadService.delete(path);
+      final path = latest.localPath;
+      if (deleteFile && path != null && path.isNotEmpty) {
+        await _downloadService.delete(path);
+      }
+      if (!mounted) return;
       state = state.copyWith(
         downloads: state.downloads.where((item) => item.id != job.id).toList(),
-        notice: automatic
-            ? 'Removed watched download: ${job.title}'
-            : 'Deleted ${job.title}.',
+        notice: deleteFile
+            ? (automatic
+                  ? 'Removed watched download: ${job.title}'
+                  : 'Deleted ${job.title}.')
+            : null,
       );
       await _saveDownloads();
       await _updateBridge();
     } catch (error) {
-      state = state.copyWith(notice: 'Could not delete ${job.title}: $error');
+      if (mounted) {
+        state = state.copyWith(
+          notice:
+              'Could not ${deleteFile ? "delete" : "cancel"} ${job.title}: $error',
+        );
+      }
+    } finally {
+      _removingDownloadIds.remove(snapshot.id);
     }
   }
 
@@ -1192,26 +1391,27 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     if (!state.connections.hasTraktSession) return;
     try {
       final remote = await _withTraktSession(
-        (client, accessToken) => client.watchedVideoIds(accessToken),
+        (client, accessToken) => client.watchedHistory(accessToken),
       );
       if (!mounted || remote == null) return;
-      final reconciledIds = {
-        state.selectedVideoId,
-        for (final job in state.downloads) job.videoId,
-      };
-      final watched = {
-        ...state.watchedTitleIds.where((id) => !reconciledIds.contains(id)),
-        ...remote,
+      final history = {...state.watchedHistory, ...remote};
+      for (final entry in state.watchedHistory.values) {
+        if (entry.localWatched != null) history[entry.id] = entry;
+      }
+      final watched = <String>{
+        ...remote.keys.where((id) => history[id]?.localWatched != false),
+        for (final entry in history.values)
+          if (entry.localWatched == true) entry.id,
       };
       state = state.copyWith(
         watchedTitleIds: watched,
         downloads: _downloadsWithWatchedState(watched),
+        watchedHistory: history,
         lastTraktSyncAt: DateTime.now().toUtc(),
         notice: silent ? null : 'Watched state refreshed from Trakt.',
         clearNotice: silent,
       );
-      await _localStateStore.saveWatched(watched);
-      await _saveDownloads();
+      await _saveHistory();
       await removeExpiredWatchedDownloads();
     } catch (error) {
       if (mounted && !silent) {
@@ -1300,15 +1500,22 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
   }
 
   Future<void> runDiagnostics() async {
-    final checks = <String, String>{};
+    final checks = <String, DiagnosticCheck>{};
     await checkDownloadedFiles();
     try {
       await _ensureBridge();
-      checks['Local Stremio addon'] = await _stremioBridge.ping()
-          ? 'Ready on ${_stremioBridge.manifestUrl}'
-          : 'Not responding on localhost';
+      final responding = await _stremioBridge.ping();
+      checks['Local Stremio addon'] = DiagnosticCheck(
+        responding
+            ? 'Ready on ${_stremioBridge.manifestUrl}'
+            : 'Not responding on localhost',
+        responding ? DiagnosticSeverity.success : DiagnosticSeverity.error,
+      );
     } catch (error) {
-      checks['Local Stremio addon'] = 'Failed: $error';
+      checks['Local Stremio addon'] = DiagnosticCheck(
+        'Failed: $error',
+        DiagnosticSeverity.error,
+      );
     }
     final complete = state.downloads.where(
       (job) =>
@@ -1318,36 +1525,68 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     final missing = complete
         .where((job) => job.status == DownloadStatus.unavailable)
         .length;
-    checks['Downloaded files'] = missing == 0
-        ? '${complete.length} readable files available'
-        : '$missing of ${complete.length} files are unavailable. Open Downloads → Needs attention to retry. Saved records do not contain the video files.';
+    checks['Downloaded files'] = DiagnosticCheck(
+      missing == 0
+          ? '${complete.length} readable files available'
+          : '$missing of ${complete.length} files are unavailable. Open Downloads to retry. Saved records do not contain the video files.',
+      missing > 0
+          ? DiagnosticSeverity.error
+          : complete.isEmpty
+          ? DiagnosticSeverity.info
+          : DiagnosticSeverity.success,
+    );
     final protectionFailures = complete
         .where(
           (job) => job.status == DownloadStatus.complete && job.error != null,
         )
         .length;
-    checks['Offline storage protection'] = protectionFailures == 0
-        ? 'No storage protection errors detected'
-        : 'Failed to protect $protectionFailures videos from Android cleanup. Original files remain playable; run checks again.';
-    checks['Episode identity'] =
-        state.downloads.every(
-          (job) => !job.mediaTitle.isSeries || job.mediaVideo != null,
-        )
-        ? 'Every series download has an exact episode ID'
-        : 'One or more legacy downloads lack an episode ID';
-    checks['AIOStreams'] = state.connections.hasAioStreams
-        ? 'Manifest configured'
-        : 'Not configured (demo mode available)';
-    checks['TorBox'] = state.connections.hasTorBox
-        ? 'API token configured'
-        : 'Not configured (demo mode available)';
-    checks['Trakt'] = state.connections.hasTraktSession
-        ? 'Connected; Stremio playback remains the scrobble owner'
-        : 'Not connected in TorBridge';
-    final available = await canLaunchUrl(Uri.parse('stremio:///board'));
-    checks['Stremio application'] = available
-        ? 'Registered for stremio:// links'
-        : 'Could not verify a stremio:// handler';
+    checks['Offline storage protection'] = DiagnosticCheck(
+      protectionFailures == 0
+          ? 'No storage protection errors detected'
+          : 'Failed to protect $protectionFailures videos from Android cleanup. Original files remain playable; run checks again.',
+      protectionFailures == 0
+          ? DiagnosticSeverity.success
+          : DiagnosticSeverity.warning,
+    );
+    final exact = state.downloads.every(
+      (job) => !job.mediaTitle.isSeries || job.mediaVideo != null,
+    );
+    checks['Episode identity'] = DiagnosticCheck(
+      exact
+          ? 'Every series download has an exact episode ID'
+          : 'One or more legacy downloads lack an episode ID',
+      exact ? DiagnosticSeverity.success : DiagnosticSeverity.warning,
+    );
+    checks['AIOStreams'] = DiagnosticCheck(
+      state.connections.hasAioStreams
+          ? 'Manifest configured'
+          : 'Not configured (demo mode available)',
+      DiagnosticSeverity.info,
+    );
+    checks['TorBox'] = DiagnosticCheck(
+      state.connections.hasTorBox
+          ? 'API token configured'
+          : 'Not configured (demo mode available)',
+      DiagnosticSeverity.info,
+    );
+    checks['Trakt'] = DiagnosticCheck(
+      state.connections.hasTraktSession
+          ? 'Connected; TorBridge playback syncs watched history. Direct Stremio playback may not sync.'
+          : 'Not connected; local watched history is available',
+      DiagnosticSeverity.info,
+    );
+    bool available = false;
+    try {
+      available = await canLaunchUrl(Uri.parse('stremio:///board'));
+    } catch (_) {
+      /* No handler. */
+    }
+    checks['Stremio application'] = DiagnosticCheck(
+      available
+          ? 'Registered for stremio:// links'
+          : 'Could not verify a stremio:// handler',
+      available ? DiagnosticSeverity.success : DiagnosticSeverity.warning,
+    );
     if (mounted) {
       state = state.copyWith(
         diagnosticChecks: checks,
@@ -1567,29 +1806,10 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     }
   }
 
-  Future<Uri> _downloadUrl(StreamCandidate source) async {
+  Future<Uri> _downloadUrl(DownloadJob job) async {
+    final source = job.source;
     if (source.streamUrl != null) return source.streamUrl!;
-    return _torBoxDownloadUrl(source);
-  }
-
-  Future<Uri> _torBoxDownloadUrl(StreamCandidate source) async {
-    final hash = source.infoHash;
-    final token = state.connections.torBoxToken;
-    if (hash == null || token == null || token.isEmpty) {
-      throw const TorBoxApiException(
-        'This source needs a TorBox torrent reference and connected API token.',
-      );
-    }
-    final torBox = _torBoxClientFactory(token);
-    final torrent = await torBox.ensureTorrent(
-      infoHash: hash,
-      cachedOnly: state.preferences.cachedOnly,
-    );
-    final file = torrent.preferredFile(source.fileIndex);
-    if (file == null) {
-      throw const TorBoxApiException('No downloadable video file was found.');
-    }
-    return torBox.requestDownloadLink(torrentId: torrent.id, fileId: file.id);
+    return _directTorBoxDownloadUrl(job);
   }
 
   Future<Uri> _directTorBoxDownloadUrl(
@@ -1646,15 +1866,18 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     }
   }
 
-  Future<void> _markSelectedWatched() async {
-    final connections = state.connections;
-    final title = state.selectedTitle;
-    if (!connections.hasTraktSession || !title.id.startsWith('tt')) return;
+  Future<void> _syncWatchedEntry(WatchedEntry entry, bool watched) async {
+    if (!mounted ||
+        !state.connections.hasTraktSession ||
+        !entry.title.id.startsWith('tt')) {
+      return;
+    }
     try {
       await _withTraktSession(
         (client, accessToken) => client.markWatched(
           accessToken: accessToken,
-          media: _traktMedia(title, state.selectedVideo),
+          media: _traktMedia(entry.title, entry.video),
+          watched: watched,
         ),
       );
     } catch (error) {
@@ -1684,9 +1907,9 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
   ) async {
     final connections = state.connections;
     if (!connections.hasTraktSession) return null;
-    final client = TraktClient(
-      clientId: connections.traktClientId!,
-      clientSecret: connections.traktClientSecret!,
+    final client = _traktClientFactory(
+      connections.traktClientId!,
+      connections.traktClientSecret!,
     );
     try {
       return await operation(client, connections.traktAccessToken!);
@@ -1829,7 +2052,19 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
   ];
 
   Future<void> _saveDownloads() async {
-    final records = [for (final job in state.downloads) _jobToRecord(job)];
+    if (!_downloadsReadable) {
+      if (mounted) {
+        state = state.copyWith(
+          notice:
+              'Saved download records could not be read and remain protected.',
+        );
+      }
+      return;
+    }
+    final records = [
+      ..._unreadDownloadRecords,
+      for (final job in state.downloads) _jobToRecord(job),
+    ];
     final operation = _downloadSaveTail.then((_) async {
       await _localStateStore.saveDownloadRecords(records);
       await _updateBridge();
@@ -1962,7 +2197,8 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
           ),
         );
       } catch (_) {
-        // Ignore one malformed legacy record and retain the rest.
+        // Keep unread records verbatim when saving valid jobs.
+        _unreadDownloadRecords.add(record);
       }
     }
     return jobs;

@@ -4,6 +4,32 @@ import 'package:torbridge/domain/media_models.dart';
 import 'package:torbridge/services/local_state_store.dart';
 
 void main() {
+  test('corrupt sections are backed up independently and unread downloads cannot be replaced', () async {
+    SharedPreferences.setMockInitialValues({
+      'completed_downloads_v1': '{broken',
+      'download_preferences_v1': '{also-broken',
+      'watched_title_ids_v1': ['tt1234567'],
+    });
+    final store = SharedPreferencesLocalStateStore();
+    final restored = await store.read();
+    expect(restored.downloadsReadable, isFalse);
+    expect(restored.watchedTitleIds, {'tt1234567'});
+    expect(restored.recoveryWarnings, hasLength(2));
+    await expectLater(store.saveDownloadRecords([]), throwsStateError);
+    final storage = await SharedPreferences.getInstance();
+    expect(storage.getString('completed_downloads_v1'), '{broken');
+    expect(
+      storage.getString('completed_downloads_v1_recovery_backup'),
+      '{broken',
+    );
+    expect(
+      storage.getString('download_preferences_v1_recovery_backup'),
+      '{also-broken',
+    );
+    await store.savePreferences(const DownloadPreferences());
+    expect((await store.read()).watchedTitleIds, {'tt1234567'});
+  });
+
   test(
     'preferences, watched state, and completed downloads survive reload',
     () async {

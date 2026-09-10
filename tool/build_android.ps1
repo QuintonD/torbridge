@@ -4,6 +4,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'native_command.ps1')
 $projectRoot = Split-Path -Parent $PSScriptRoot
 & (Join-Path $PSScriptRoot 'prepare_plugin_junctions.ps1') -Flutter $Flutter
 
@@ -20,8 +21,7 @@ try {
         $buildArguments += @('--target-platform', 'android-arm64', '--split-per-abi',
             '-P', 'force-version-code-ignoring-abi=true')
     }
-    & $Flutter @buildArguments
-    if ($LASTEXITCODE -ne 0) { throw 'Android release build failed.' }
+    Invoke-NativeCommand -Executable $Flutter -Arguments $buildArguments
     $dist = Join-Path $projectRoot 'dist'
     New-Item -ItemType Directory -Path $dist -Force | Out-Null
     $versionLine = Select-String -LiteralPath 'pubspec.yaml' -Pattern '^version:\s*([^+\s]+)'

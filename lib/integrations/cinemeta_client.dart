@@ -4,7 +4,16 @@ import '../domain/catalog_title.dart';
 
 class CinemetaClient {
   CinemetaClient({Dio? dio})
-    : _dio = dio ?? Dio(BaseOptions(baseUrl: 'https://v3-cinemeta.strem.io'));
+    : _dio =
+          dio ??
+          Dio(
+            BaseOptions(
+              baseUrl: 'https://v3-cinemeta.strem.io',
+              connectTimeout: const Duration(seconds: 15),
+              sendTimeout: const Duration(seconds: 15),
+              receiveTimeout: const Duration(seconds: 30),
+            ),
+          );
 
   final Dio _dio;
 

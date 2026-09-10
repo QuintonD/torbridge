@@ -278,7 +278,10 @@ class DioDownloadService extends DownloadService {
   }) async {
     final directory = await _downloadsDirectory();
     await directory.create(recursive: true);
-    final path = _uniquePath(directory, suggestedName);
+    // createTemp atomically reserves a directory for this attempt. Concurrent
+    // transfers cannot select or overwrite each other's destination.
+    final attempt = await directory.createTemp('transfer-');
+    final path = '${attempt.path}${Platform.pathSeparator}$suggestedName';
     final cancelToken = CancelToken();
     _cancelTokens[jobId] = cancelToken;
     onEnqueued?.call(jobId);
@@ -311,19 +314,5 @@ class DioDownloadService extends DownloadService {
     if (external != null) return Directory('${external.path}/TorBridge');
     final documents = await getApplicationDocumentsDirectory();
     return Directory('${documents.path}/TorBridge');
-  }
-
-  String _uniquePath(Directory directory, String filename) {
-    final dot = filename.lastIndexOf('.');
-    final base = dot > 0 ? filename.substring(0, dot) : filename;
-    final extension = dot > 0 ? filename.substring(dot) : '';
-    var path = '${directory.path}${Platform.pathSeparator}$filename';
-    var suffix = 2;
-    while (File(path).existsSync()) {
-      path =
-          '${directory.path}${Platform.pathSeparator}$base ($suffix)$extension';
-      suffix++;
-    }
-    return path;
   }
 }

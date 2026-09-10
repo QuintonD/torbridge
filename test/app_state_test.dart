@@ -1,3 +1,19 @@
+import 'dart:convert';
+
+import 'package:torbridge/domain/watched_entry.dart';
+
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:dio/dio.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
+import 'package:torbridge/domain/stream_parser.dart';
+import 'package:torbridge/integrations/trakt_client.dart';
+import 'package:torbridge/features/library/library_screen.dart';
+
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -15,6 +31,7 @@ import 'package:torbridge/services/setup_transfer_service.dart';
 import 'package:torbridge/services/stremio_bridge_service.dart';
 
 void main() {
+  auditProbes();
   for (final schema in [2, 3]) {
     test(
       'saved error migration distinguishes old and new records: $schema',
@@ -1119,6 +1136,7 @@ class _MemoryStateStore implements LocalStateStore {
   @override
   Future<void> saveDownloadRecords(List<Map<String, dynamic>> records) async {
     value = StoredLocalState(
+      historyRecords: value.historyRecords,
       preferences: value.preferences,
       watchedTitleIds: value.watchedTitleIds,
       downloadRecords: records,
@@ -1128,6 +1146,7 @@ class _MemoryStateStore implements LocalStateStore {
   @override
   Future<void> savePreferences(DownloadPreferences preferences) async {
     value = StoredLocalState(
+      historyRecords: value.historyRecords,
       preferences: preferences,
       watchedTitleIds: value.watchedTitleIds,
       downloadRecords: value.downloadRecords,
@@ -1135,11 +1154,546 @@ class _MemoryStateStore implements LocalStateStore {
   }
 
   @override
+  Future<void> saveHistory(List<Map<String, dynamic>> records) async {
+    value = StoredLocalState(
+      preferences: value.preferences,
+      watchedTitleIds: value.watchedTitleIds,
+      downloadRecords: value.downloadRecords,
+      historyRecords: records,
+    );
+  }
+
+  @override
   Future<void> saveWatched(Set<String> titleIds) async {
     value = StoredLocalState(
+      historyRecords: value.historyRecords,
       preferences: value.preferences,
       watchedTitleIds: titleIds,
       downloadRecords: value.downloadRecords,
     );
+  }
+}
+
+void auditProbes() {
+  test('AUDIT initial torrent download validates the requested episode instead of the index', () async {
+    final service = _RecordingDownloadService();
+    final credentials = _MemoryCredentials()
+      ..value = const StoredConnections(torBoxToken: 'fixture');
+    final controller = TorBridgeController(
+      service,
+      _FakeBridge(),
+      credentials,
+      CinemetaClient(),
+      AioStreamsClient(),
+      _MemoryStateStore(),
+      (_) => _ProvisioningTorBoxClient(),
+    );
+    addTearDown(controller.dispose);
+    await controller.initialize();
+    controller.selectTitle(_seriesTitle);
+    controller.selectVideo(_seriesEpisodes[1]);
+    await controller.downloadCandidate(
+      const StreamCandidate(
+        id: 'pack',
+        addonName: 'Fixture',
+        displayName: 'Season pack',
+        description: '',
+        resolution: VideoResolution.fullHd1080,
+        codec: VideoCodec.hevc,
+        hdr: HdrFormat.sdr,
+        cacheStatus: CacheStatus.cached,
+        audioLanguages: {'English'},
+        subtitleLanguages: {},
+        sizeBytes: 500000000,
+        releaseTags: {},
+        infoHash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        fileIndex: 0,
+      ),
+    );
+    expect(service.urls.single.path, '/fresh-2');
+    expect(controller.state.downloads.single.mediaVideo?.code, 'S01E02');
+  });
+
+  test('AUDIT metadata distinguishes positive labels and binary units', () {
+    const parser = StreamParser();
+    for (final label in [
+      'Not cached',
+      'Uncached',
+      'Needs caching',
+      'Not instantly cached',
+    ]) {
+      expect(
+        parser.parseStream({'title': label}).cacheStatus,
+        CacheStatus.uncached,
+      );
+    }
+    for (final label in ['Cached', 'Instant']) {
+      expect(
+        parser.parseStream({'title': label}).cacheStatus,
+        CacheStatus.cached,
+      );
+    }
+    expect(parser.parseStream({'title': '1 MiB'}).sizeBytes, 1048576);
+    expect(parser.parseStream({'title': '1 MB'}).sizeBytes, 1000000);
+    expect(parser.parseStream({'title': '10 GB'}).sizeBytes, 10000000000);
+    expect(parser.parseStream({'title': 'HDR10'}).hdr, HdrFormat.hdr10);
+    expect(
+      parser.parseStream({'title': 'HDR10+ HEVC'}).hdr,
+      HdrFormat.hdr10Plus,
+    );
+  });
+
+  test(
+    'AUDIT cancellation during enqueue retires the eventual native job',
+    () async {
+      final service = _AuditEnqueueService();
+      final controller = TorBridgeController(
+        service,
+        _FakeBridge(),
+        _EmptyCredentials(),
+        CinemetaClient(),
+        AioStreamsClient(),
+        _MemoryStateStore(),
+      );
+      addTearDown(controller.dispose);
+      await controller.initialize();
+      final transfer = controller.downloadCandidate(_fallbackCandidate);
+      await service.entered.future;
+      final cancelling = controller.cancelDownload(
+        controller.state.downloads.single,
+      );
+      await Future<void>.delayed(Duration.zero);
+      service.allowEnqueue.complete();
+      await cancelling;
+      expect(service.cancelled, contains('native-new'));
+      expect(controller.state.downloads, isEmpty);
+      service.finish.complete();
+      await transfer;
+      expect(controller.state.downloads, isEmpty);
+    },
+  );
+
+  test(
+    'AUDIT history metadata survives restart without any download record',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final store = SharedPreferencesLocalStateStore();
+      final first = TorBridgeController(
+        _RecordingDownloadService(),
+        _FakeBridge(),
+        _EmptyCredentials(),
+        CinemetaClient(),
+        AioStreamsClient(),
+        store,
+      );
+      await first.initialize();
+      final title = _auditTitle('A real catalog title');
+      await first.scrobble(
+        title: title,
+        action: TraktScrobbleAction.stop,
+        progress: 100,
+      );
+      first.dispose();
+      final second = TorBridgeController(
+        _RecordingDownloadService(),
+        _FakeBridge(),
+        _EmptyCredentials(),
+        CinemetaClient(),
+        AioStreamsClient(),
+        SharedPreferencesLocalStateStore(),
+      );
+      addTearDown(second.dispose);
+      await second.initialize();
+      expect(second.state.downloads, isEmpty);
+      expect(second.state.watchedTitleIds, contains(title.id));
+      expect(second.state.watchedHistory[title.id]?.title.name, title.name);
+    },
+  );
+
+  test('AUDIT Trakt failure preserves local completion and toggles target the supplied ID in order', () async {
+    final trakt = _AuditTrakt();
+    final credentials = _MemoryCredentials()
+      ..value = const StoredConnections(
+        traktClientId: 'fixture',
+        traktClientSecret: 'fixture',
+        traktAccessToken: 'fixture',
+      );
+    final controller = TorBridgeController(
+      _RecordingDownloadService(),
+      _FakeBridge(),
+      credentials,
+      CinemetaClient(),
+      AioStreamsClient(),
+      _MemoryStateStore(),
+      null,
+      (_, _) => trakt,
+    );
+    addTearDown(controller.dispose);
+    await controller.initialize();
+    await controller.scrobble(
+      title: controller.state.selectedTitle,
+      action: TraktScrobbleAction.stop,
+      progress: 100,
+    );
+    expect(
+      controller.state.watchedTitleIds,
+      contains(controller.state.selectedTitle.id),
+    );
+    controller.toggleWatched('tt1234567:2:3');
+    controller.toggleWatched('tt1234567:2:3');
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(trakt.changes, ['tt1234567:2:3:true', 'tt1234567:2:3:false']);
+    trakt.remote = {'tt1234567:2:3': WatchedEntry.placeholder('tt1234567:2:3')};
+    await controller.syncTraktWatched();
+    expect(controller.state.watchedTitleIds, isNot(contains('tt1234567:2:3')));
+    expect(
+      controller.state.watchedTitleIds,
+      contains(controller.state.selectedTitle.id),
+    );
+  });
+
+  test('AUDIT clearing search invalidates a pending result', () async {
+    final catalog = _AuditCatalog();
+    final controller = TorBridgeController(
+      _RecordingDownloadService(),
+      _FakeBridge(),
+      _EmptyCredentials(),
+      catalog,
+      AioStreamsClient(),
+      _MemoryStateStore(),
+    );
+    addTearDown(controller.dispose);
+    await controller.initialize();
+    final pending = controller.searchCatalog('old');
+    await controller.searchCatalog('');
+    catalog.oldResult.complete([_auditTitle('Old query')]);
+    await pending;
+    expect(controller.state.catalogTitles, demoTitles);
+    expect(controller.state.busy, isFalse);
+  });
+
+  test(
+    'AUDIT unreadable individual download records survive later saves',
+    () async {
+      final store = _MemoryStateStore()
+        ..value = const StoredLocalState(
+          downloadRecords: [
+            {
+              'id': 'legacy-unreadable',
+              'source': 'bad-shape',
+              'localPath': '/precious/video.mp4',
+            },
+          ],
+        );
+      final controller = TorBridgeController(
+        _RecordingDownloadService(),
+        _FakeBridge(),
+        _EmptyCredentials(),
+        CinemetaClient(),
+        AioStreamsClient(),
+        store,
+      );
+      addTearDown(controller.dispose);
+      await controller.initialize();
+      await controller.downloadCandidate(_fallbackCandidate);
+      expect(
+        store.value.downloadRecords.any(
+          (record) => record['id'] == 'legacy-unreadable',
+        ),
+        isTrue,
+      );
+    },
+  );
+
+  test('AUDIT episode index must not select a different episode', () {
+    const pack = TorBoxTorrent(
+      id: 1,
+      hash: 'fixture',
+      name: 'Series',
+      files: [
+        TorBoxFile(id: 1, name: 'Series.S01E01.mkv', size: 200),
+        TorBoxFile(id: 2, name: 'Series.S01E02.mkv', size: 100),
+      ],
+    );
+    expect(pack.episodeFile('S01E02', 99)?.id, 2);
+  });
+  test('AUDIT episode names require numeric boundaries', () {
+    const pack = TorBoxTorrent(
+      id: 1,
+      hash: 'fixture',
+      name: 'Series',
+      files: [TorBoxFile(id: 10, name: 'Series.S01E010.mkv', size: 100)],
+    );
+    expect(pack.episodeFile('S01E01'), isNull);
+  });
+  test('AUDIT not cached must not be instantly cached', () {
+    final source = const StreamParser().parseStream({
+      'name': 'Provider',
+      'title': 'Movie 1080p HEVC English Not cached',
+    });
+    expect(source.cacheStatus, isNot(CacheStatus.cached));
+  });
+  test('AUDIT binary file units must respect a hard size limit', () {
+    final source = const StreamParser().parseStream({'title': 'Movie 10 GiB'});
+    expect(source.sizeBytes, 10737418240);
+  });
+  test('AUDIT HDR10 plus must retain its format', () {
+    final source = const StreamParser().parseStream({'title': 'Movie HDR10+'});
+    expect(source.hdr, HdrFormat.hdr10Plus);
+  });
+  test(
+    'AUDIT finishing playback without Trakt records local watched state',
+    () async {
+      final controller = TorBridgeController(
+        _RecordingDownloadService(),
+        _FakeBridge(),
+        _EmptyCredentials(),
+        CinemetaClient(),
+        AioStreamsClient(),
+        _MemoryStateStore(),
+      );
+      addTearDown(controller.dispose);
+      await controller.initialize();
+      await controller.scrobble(
+        title: controller.state.selectedTitle,
+        action: TraktScrobbleAction.stop,
+        progress: 100,
+      );
+      expect(
+        controller.state.watchedTitleIds,
+        contains(controller.state.selectedTitle.id),
+      );
+    },
+  );
+  test(
+    'AUDIT late search response must not overwrite the newest search',
+    () async {
+      final catalog = _AuditCatalog();
+      final controller = TorBridgeController(
+        _RecordingDownloadService(),
+        _FakeBridge(),
+        _EmptyCredentials(),
+        catalog,
+        AioStreamsClient(),
+        _MemoryStateStore(),
+      );
+      addTearDown(controller.dispose);
+      await controller.initialize();
+      final first = controller.searchCatalog('old');
+      final second = controller.searchCatalog('new');
+      catalog.newResult.complete([_auditTitle('New query')]);
+      await second;
+      catalog.oldResult.complete([_auditTitle('Old query')]);
+      await first;
+      expect(controller.state.catalogTitles.single.name, 'New query');
+    },
+  );
+  test(
+    'AUDIT corrupt preferences must not allow old download records to be lost',
+    () async {
+      SharedPreferences.setMockInitialValues({
+        'download_preferences_v1': '{broken',
+        'completed_downloads_v1': jsonEncode([
+          {
+            'id': 'old-record',
+            'title': 'Existing video',
+            'status': 'failed',
+            'mediaTitle': {
+              'id': 'tt12345',
+              'type': 'movie',
+              'name': 'Existing video',
+            },
+            'source': {
+              'addonName': 'Test',
+              'displayName': 'Existing video',
+              'description': '',
+            },
+          },
+        ]),
+      });
+      final controller = TorBridgeController(
+        _RecordingDownloadService(),
+        _FakeBridge(),
+        _EmptyCredentials(),
+        CinemetaClient(),
+        AioStreamsClient(),
+        SharedPreferencesLocalStateStore(),
+      );
+      addTearDown(controller.dispose);
+      await controller.initialize();
+      await controller.downloadCandidate(_fallbackCandidate);
+      final saved = (await SharedPreferences.getInstance()).getString(
+        'completed_downloads_v1',
+      )!;
+      expect(saved, contains('old-record'));
+    },
+  );
+  test('AUDIT cancellation uses the latest platform download ID', () async {
+    final service = _AuditEnqueueService();
+    final controller = TorBridgeController(
+      service,
+      _FakeBridge(),
+      _EmptyCredentials(),
+      CinemetaClient(),
+      AioStreamsClient(),
+      _MemoryStateStore(),
+    );
+    addTearDown(controller.dispose);
+    await controller.initialize();
+    final transfer = controller.downloadCandidate(_fallbackCandidate);
+    await service.entered.future;
+    final staleCard = controller.state.downloads.single;
+    service.allowEnqueue.complete();
+    await service.enqueued.future;
+    expect(controller.state.downloads.single.platformId, 'native-new');
+    await controller.cancelDownload(staleCard);
+    service.finish.complete();
+    await transfer;
+    expect(service.cancelled, contains('native-new'));
+  });
+  testWidgets(
+    'AUDIT watched library includes non-demo titles without local files',
+    (tester) async {
+      final controller = TorBridgeController(
+        _RecordingDownloadService(),
+        _FakeBridge(),
+        _EmptyCredentials(),
+        CinemetaClient(),
+        AioStreamsClient(),
+        _MemoryStateStore(),
+      );
+      await controller.initialize();
+      controller.toggleWatched('tt1234567');
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            torBridgeControllerProvider.overrideWith((ref) => controller),
+          ],
+          child: const MaterialApp(home: Scaffold(body: LibraryScreen())),
+        ),
+      );
+      await tester.pump();
+      expect(find.text('Your viewing history starts here'), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+  test('AUDIT concurrent Windows downloads must use distinct files', () async {
+    final dir = await Directory.systemTemp.createTemp('torbridge-audit-');
+    final oldPaths = PathProviderPlatform.instance;
+    PathProviderPlatform.instance = _AuditPaths(dir.path);
+    final dio = Dio()..httpClientAdapter = _AuditHttpAdapter();
+    final service = DioDownloadService(dio: dio);
+    try {
+      final paths = await Future.wait([
+        for (final id in ['one', 'two'])
+          service.download(
+            jobId: id,
+            url: Uri.parse('https://fixture.invalid/$id'),
+            suggestedName: 'same.mp4',
+            onProgress: (_, _) {},
+          ),
+      ]);
+      expect(paths.toSet(), hasLength(2));
+      expect(await File(paths[0]).readAsString(), '/one');
+      expect(await File(paths[1]).readAsString(), '/two');
+    } finally {
+      PathProviderPlatform.instance = oldPaths;
+      dio.close(force: true);
+      await dir.delete(recursive: true);
+    }
+  }, skip: !Platform.isWindows);
+}
+
+CatalogTitle _auditTitle(String name) => CatalogTitle(
+  id: name,
+  type: 'movie',
+  name: name,
+  year: 2026,
+  summary: '',
+  genre: '',
+  color: 0xFF000000,
+);
+
+class _AuditCatalog extends CinemetaClient {
+  final oldResult = Completer<List<CatalogTitle>>();
+  final newResult = Completer<List<CatalogTitle>>();
+  @override
+  Future<List<CatalogTitle>> search(String query) =>
+      query == 'old' ? oldResult.future : newResult.future;
+}
+
+class _AuditEnqueueService extends DownloadService {
+  final entered = Completer<void>();
+  final allowEnqueue = Completer<void>();
+  final enqueued = Completer<void>();
+  final finish = Completer<void>();
+  final cancelled = <String?>[];
+  @override
+  Future<String> download({
+    required String jobId,
+    required Uri url,
+    required String suggestedName,
+    required DownloadProgressCallback onProgress,
+    DownloadEnqueuedCallback? onEnqueued,
+    Map<String, String> requestHeaders = const {},
+  }) async {
+    entered.complete();
+    await allowEnqueue.future;
+    onEnqueued?.call('native-new');
+    enqueued.complete();
+    await finish.future;
+    return '/fixture/movie.mp4';
+  }
+
+  @override
+  Future<void> cancel({required String jobId, String? platformId}) async =>
+      cancelled.add(platformId);
+}
+
+class _AuditPaths extends PathProviderPlatform {
+  _AuditPaths(this.path);
+  final String path;
+  @override
+  Future<String?> getDownloadsPath() async => path;
+}
+
+class _AuditHttpAdapter implements HttpClientAdapter {
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    return ResponseBody.fromString(options.uri.path, 200);
+  }
+
+  @override
+  void close({bool force = false}) {}
+}
+
+class _AuditTrakt extends TraktClient {
+  _AuditTrakt() : super(clientId: 'fixture', clientSecret: 'fixture');
+  final changes = <String>[];
+  Map<String, WatchedEntry> remote = {};
+  @override
+  Future<Map<String, WatchedEntry>> watchedHistory(String accessToken) async =>
+      remote;
+  @override
+  Future<void> scrobble({
+    required String accessToken,
+    required TraktMedia media,
+    required TraktScrobbleAction action,
+    required double progress,
+  }) async => throw StateError('Fixture offline');
+  @override
+  Future<void> markWatched({
+    required String accessToken,
+    required TraktMedia media,
+    DateTime? watchedAt,
+    bool watched = true,
+  }) async {
+    await Future<void>.delayed(const Duration(milliseconds: 2));
+    changes.add('${media.imdbId}:${media.season}:${media.episode}:$watched');
   }
 }

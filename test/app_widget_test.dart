@@ -383,6 +383,7 @@ class _MemoryLocalStateStore implements LocalStateStore {
   @override
   Future<void> savePreferences(DownloadPreferences preferences) async {
     value = StoredLocalState(
+      historyRecords: value.historyRecords,
       preferences: preferences,
       watchedTitleIds: value.watchedTitleIds,
       downloadRecords: value.downloadRecords,
@@ -390,8 +391,19 @@ class _MemoryLocalStateStore implements LocalStateStore {
   }
 
   @override
+  Future<void> saveHistory(List<Map<String, dynamic>> records) async {
+    value = StoredLocalState(
+      preferences: value.preferences,
+      watchedTitleIds: value.watchedTitleIds,
+      downloadRecords: value.downloadRecords,
+      historyRecords: records,
+    );
+  }
+
+  @override
   Future<void> saveWatched(Set<String> titleIds) async {
     value = StoredLocalState(
+      historyRecords: value.historyRecords,
       preferences: value.preferences,
       watchedTitleIds: titleIds,
       downloadRecords: value.downloadRecords,
@@ -401,6 +413,7 @@ class _MemoryLocalStateStore implements LocalStateStore {
   @override
   Future<void> saveDownloadRecords(List<Map<String, dynamic>> records) async {
     value = StoredLocalState(
+      historyRecords: value.historyRecords,
       preferences: value.preferences,
       watchedTitleIds: value.watchedTitleIds,
       downloadRecords: records,

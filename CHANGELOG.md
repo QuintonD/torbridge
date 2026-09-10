@@ -3,6 +3,24 @@
 Installable files are available in [GitHub Releases](https://github.com/QuintonD/torbridge/releases).
 Android and Windows can have different current versions.
 
+## Android and Windows 1.2.11 - 2026-09-10
+
+- Fix every reproduced issue and additional finding from the September audit:
+  exact season-pack selection, concurrent Windows filenames, saved-state recovery,
+  cancellation races, local watched history, search ordering, and source metadata.
+- Preserve history metadata independently of files and record completion even
+  without Trakt or when its request fails. Correct explicit mark-unwatched sync.
+- Serialize Trakt authorization polling, honor slowdown, and load all watched
+  pages even when Trakt returns fewer entries than requested.
+- Use explicit diagnostic severity and correct audio/subtitle separators.
+- Package current Windows versions and update all plugin files with an installation
+  backup. Judge native packaging commands by their exit code.
+- Retain the Android interrupted-download recovery and storage protection fixes
+  from 1.2.10, with the same app ID and signing certificate for in-place updates.
+
+[Audit and resolution](docs/application-audit-2026-09-10.md) -
+[Release details](docs/releases/v1.2.11.md).
+
 ## Android 1.2.10 — 2026-09-10
 
 - Correct the misleading "file already exists" message for Android's interrupted

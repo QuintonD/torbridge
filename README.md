@@ -14,11 +14,11 @@ video downloads, built-in playback, Stremio integration, and optional Trakt sync
 
 | Your device | Current build | Download |
 | --- | --- | --- |
-| **Pixel 7a, Galaxy S25, and other ARM64 phones** | Android **1.2.10**, 42.4 MB | **[Download ARM64 APK](https://github.com/QuintonD/torbridge/releases/download/v1.2.10/TorBridge-Android-1.2.10-arm64.apk)** |
-| Other supported Android architectures | Android **1.2.10**, 120.8 MB | [Download universal APK](https://github.com/QuintonD/torbridge/releases/download/v1.2.10/TorBridge-Android-1.2.10.apk) |
-| Windows x64 | Windows **1.2.7**, 34.0 MB | [Download Windows ZIP](https://github.com/QuintonD/torbridge/releases/download/v1.2.7/TorBridge-Windows-x64-1.2.7.zip) |
+| **Pixel 7a, Galaxy S25, and other ARM64 phones** | Android **1.2.11**, 42.4 MB | **[Download ARM64 APK](https://github.com/QuintonD/torbridge/releases/download/v1.2.11/TorBridge-Android-1.2.11-arm64.apk)** |
+| Other supported Android architectures | Android **1.2.11**, 121.0 MB | [Download universal APK](https://github.com/QuintonD/torbridge/releases/download/v1.2.11/TorBridge-Android-1.2.11.apk) |
+| Windows x64 | Windows **1.2.11**, 34.1 MB | [Download Windows ZIP](https://github.com/QuintonD/torbridge/releases/download/v1.2.11/TorBridge-Windows-x64-1.2.11.zip) |
 
-[Latest Android release notes](https://github.com/QuintonD/torbridge/releases/tag/v1.2.10) · [SHA-256 checksums](https://github.com/QuintonD/torbridge/releases/download/v1.2.10/SHA256SUMS.txt) · [All releases](https://github.com/QuintonD/torbridge/releases)
+[Release notes](https://github.com/QuintonD/torbridge/releases/tag/v1.2.11) · [SHA-256 checksums](https://github.com/QuintonD/torbridge/releases/download/v1.2.11/SHA256SUMS.txt) · [All releases](https://github.com/QuintonD/torbridge/releases)
 
 ### Updating an existing installation
 
@@ -34,19 +34,17 @@ See the [installation and update guide](docs/updating.md) for details. GitHub's
 **Source code** archives are for development, not installation. Android builds
 are signed for personal sideloading and are not distributed through Google Play.
 
-### What's new in Android 1.2.10
+### What's new in 1.2.11
 
-Interrupted downloads were incorrectly reported as “file already exists.” This
-update corrects the message and enables source refresh and TorBox recovery for
-that failure. Retry lookups have timeouts, Android network waits have clear
-status messages, and unsuccessful deletion keeps the download record visible.
+The [September audit](docs/application-audit-2026-09-10.md) is now resolved:
+correct episode selection, reliable cancellation, safe concurrent Windows
+transfers, independent saved-state recovery, persistent local watched history,
+and accurate source labels. Trakt authorization and history sync, search ordering,
+diagnostics, player labels, and Windows update tooling are repaired too.
 
-Install the update, then retry one affected video while online and check playback.
-The previous library retention protection remains in place.
-[Read the investigation and validation](docs/android-download-retry.md).
-
-The [application audit](docs/application-audit-2026-09-10.md) documents additional
-known issues and reproducible cases. Those findings are not fixed by 1.2.10.
+The Android interrupted-download recovery from 1.2.10 remains included. Retry
+one affected download after updating and confirm playback before retrying the rest.
+See the [release notes](docs/releases/v1.2.11.md) for the full fixes and validation.
 
 ## A look inside
 

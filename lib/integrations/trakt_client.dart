@@ -1,5 +1,8 @@
 import 'package:dio/dio.dart';
 
+import '../domain/catalog_title.dart';
+import '../domain/watched_entry.dart';
+
 enum TraktDeviceStatus { pending, approved, expired, denied, slowDown, invalid }
 
 class TraktDeviceCode {
@@ -92,8 +95,15 @@ class TraktClient {
     required this.clientSecret,
     Dio? apiDio,
     Dio? authDio,
-  }) : _apiDio = apiDio ?? Dio(BaseOptions(baseUrl: 'https://api.trakt.tv')),
-       _authDio = authDio ?? Dio(BaseOptions(baseUrl: 'https://auth.trakt.tv'));
+  }) : _apiDio = apiDio ?? Dio(_options('https://api.trakt.tv')),
+       _authDio = authDio ?? Dio(_options('https://auth.trakt.tv'));
+
+  static BaseOptions _options(String url) => BaseOptions(
+    baseUrl: url,
+    connectTimeout: const Duration(seconds: 15),
+    sendTimeout: const Duration(seconds: 15),
+    receiveTimeout: const Duration(seconds: 30),
+  );
 
   final String clientId;
   final String clientSecret;
@@ -207,6 +217,7 @@ class TraktClient {
     required String accessToken,
     required TraktMedia media,
     DateTime? watchedAt,
+    bool watched = true,
   }) async {
     final timestamp = (watchedAt ?? DateTime.now().toUtc()).toIso8601String();
     final body = media.toScrobbleJson();
@@ -219,7 +230,10 @@ class TraktClient {
                   {
                     'number': media.season,
                     'episodes': [
-                      {'number': media.episode, 'watched_at': timestamp},
+                      {
+                        'number': media.episode,
+                        if (watched) 'watched_at': timestamp,
+                      },
                     ],
                   },
                 ],
@@ -230,19 +244,31 @@ class TraktClient {
             'movies': [
               {
                 ...(body['movie'] as Map<String, dynamic>),
-                'watched_at': timestamp,
+                if (watched) 'watched_at': timestamp,
               },
             ],
           };
     await _apiDio.post<Map<String, dynamic>>(
-      '/sync/history',
+      watched ? '/sync/history' : '/sync/history/remove',
       data: data,
       options: _apiOptions(accessToken),
     );
   }
 
-  Future<Set<String>> watchedVideoIds(String accessToken) async {
-    final result = <String>{};
+  Future<Set<String>> watchedVideoIds(String accessToken) async =>
+      (await watchedHistory(accessToken)).keys.toSet();
+
+  Future<Map<String, WatchedEntry>> watchedHistory(String accessToken) async {
+    final result = <String, WatchedEntry>{};
+    CatalogTitle title(Map media, String imdb, String type) => CatalogTitle(
+      id: imdb,
+      type: type,
+      name: '${media['title'] ?? imdb}',
+      year: _asInt(media['year']),
+      summary: '',
+      genre: '',
+      color: 0xFF5141A8,
+    );
     await _readWatchedPages(
       accessToken: accessToken,
       path: '/sync/watched/movies',
@@ -253,7 +279,9 @@ class TraktClient {
         final ids = movie['ids'];
         if (ids is! Map) return;
         final imdb = '${ids['imdb'] ?? ''}';
-        if (imdb.startsWith('tt')) result.add(imdb);
+        if (imdb.startsWith('tt')) {
+          result[imdb] = WatchedEntry(title(movie, imdb, 'movie'));
+        }
       },
     );
     await _readWatchedPages(
@@ -272,11 +300,22 @@ class TraktClient {
         for (final rawSeason in seasons.whereType<Map>()) {
           final season = _asInt(rawSeason['number']);
           final episodes = rawSeason['episodes'];
-          if (season <= 0 || episodes is! List) continue;
+          if (season < 0 || episodes is! List) continue;
           for (final rawEpisode in episodes.whereType<Map>()) {
             final episode = _asInt(rawEpisode['number']);
             final plays = _asInt(rawEpisode['plays']);
-            if (episode > 0 && plays > 0) result.add('$imdb:$season:$episode');
+            if (episode > 0 && plays > 0) {
+              final id = '$imdb:$season:$episode';
+              result[id] = WatchedEntry(
+                title(show, imdb, 'series'),
+                video: CatalogVideo(
+                  id: id,
+                  title: 'Episode $episode',
+                  season: season,
+                  episode: episode,
+                ),
+              );
+            }
           }
         }
       },
@@ -290,7 +329,7 @@ class TraktClient {
     required Map<String, dynamic> query,
     required void Function(Map<String, dynamic> item) onItem,
   }) async {
-    for (var page = 1; page <= 100; page++) {
+    for (var page = 1; page <= 10000; page++) {
       final response = await _apiDio.get<List<dynamic>>(
         path,
         queryParameters: {...query, 'page': page, 'limit': 100},
@@ -300,8 +339,16 @@ class TraktClient {
       for (final raw in items.whereType<Map>()) {
         onItem(Map<String, dynamic>.from(raw));
       }
-      if (items.length < 100) break;
+      // Trakt may reduce effective page size for extended=progress.
+      // A short page is not proof that history is complete.
+      final pages = int.tryParse(
+        response.headers.value('x-pagination-page-count') ?? '',
+      );
+      if (items.isEmpty || (pages != null && page >= pages)) return;
     }
+    throw StateError(
+      'Trakt history exceeded the pagination limit; existing history was preserved.',
+    );
   }
 
   Options _apiOptions(String accessToken) => Options(

@@ -34,12 +34,23 @@ Close TorBridge, extract the entire new ZIP into a new folder, and run
 `torbridge.exe` there. Keep its DLLs and `data` folder beside the executable.
 Keep the older application folder until the update launches successfully.
 
+For a developer-built bundle, `tool/update_local_windows.ps1` also supports
+updating an existing program directory after closing TorBridge:
+
+```powershell
+.\tool\update_local_windows.ps1 -InstallDirectory 'C:\Apps\TorBridge'
+```
+
+Build first with `tool/build_windows.ps1`. The updater reads the bundle's version,
+stages every file, and retains the previous installation in a sibling backup
+folder. It leaves user settings and downloaded media untouched.
+
 ## Check a download
 
 New releases include `SHA256SUMS.txt`. On Windows, compare its entry with:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 -LiteralPath .\TorBridge-Android-1.2.10-arm64.apk
+Get-FileHash -Algorithm SHA256 -LiteralPath .\TorBridge-Android-1.2.11-arm64.apk
 ```
 
 Only install release files from this repository. The files GitHub labels

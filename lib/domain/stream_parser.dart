@@ -122,7 +122,7 @@ class StreamParser {
     if (RegExp(r'\b(dolby[ ._-]?vision|dovi|dv)\b').hasMatch(lower)) {
       return HdrFormat.dolbyVision;
     }
-    if (RegExp(r'\bhdr10\+\b').hasMatch(lower)) return HdrFormat.hdr10Plus;
+    if (RegExp(r'\bhdr10\+(?!\w)').hasMatch(lower)) return HdrFormat.hdr10Plus;
     if (RegExp(r'\b(hdr10|hdr)\b').hasMatch(lower)) return HdrFormat.hdr10;
     if (RegExp(r'\bsdr\b').hasMatch(lower)) return HdrFormat.sdr;
     return HdrFormat.unknown;
@@ -130,6 +130,12 @@ class StreamParser {
 
   CacheStatus _cacheStatus(String value) {
     final lower = value.toLowerCase();
+    if (RegExp(
+          r'\b(?:not[ ._-]+(?:instantly[ ._-]+)?cached|uncached|needs[ ._-]+caching)\b',
+        ).hasMatch(lower) ||
+        value.contains('⏳')) {
+      return CacheStatus.uncached;
+    }
     if (value.contains('⚡') ||
         lower.contains('cached') && !lower.contains('uncached') ||
         lower.contains('instant')) {
@@ -198,8 +204,10 @@ class StreamParser {
     final unit = match.group(2)!.toLowerCase();
     final multiplier = switch (unit) {
       'tb' => 1000000000000,
-      'gb' || 'gib' => 1000000000,
-      'mb' || 'mib' => 1000000,
+      'gb' => 1000000000,
+      'gib' => 1073741824,
+      'mb' => 1000000,
+      'mib' => 1048576,
       _ => 1,
     };
     return (amount * multiplier).round();
