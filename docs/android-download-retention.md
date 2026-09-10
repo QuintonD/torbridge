@@ -34,9 +34,12 @@ checks again retries protection without re-downloading.
 Retries now enter the preparing state immediately and ignore repeated taps for
 the same job. Each transfer has its own destination directory, avoiding conflicts
 with previous attempts. Android file/storage errors are no longer incorrectly
-attributed to the stream server. The later Pixel screenshot's "file already
-exists" error is a local destination conflict and does not prove that a complete,
-playable copy of the original video remains.
+attributed to the stream server.
+
+Correction in 1.2.10: the earlier interpretation of the Pixel screenshot as a
+destination conflict was incorrect. Versions through 1.2.9 mislabeled Android
+reason 1008 (cannot resume) as "file already exists"; actual destination conflicts
+use 1009. See [interrupted download recovery](android-download-retry.md).
 
 ## Verification
 

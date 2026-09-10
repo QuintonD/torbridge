@@ -5,7 +5,15 @@ import '../domain/stream_parser.dart';
 
 class AioStreamsClient {
   AioStreamsClient({Dio? dio, List<Uri>? torrentioBaseUrls})
-    : _dio = dio ?? Dio(),
+    : _dio =
+          dio ??
+          Dio(
+            BaseOptions(
+              connectTimeout: const Duration(seconds: 15),
+              receiveTimeout: const Duration(seconds: 30),
+              sendTimeout: const Duration(seconds: 15),
+            ),
+          ),
       _torrentioBaseUrls =
           torrentioBaseUrls ??
           [

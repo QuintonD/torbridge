@@ -8,6 +8,18 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   test(
+    'Android cannot-resume and destination-conflict codes stay distinct',
+    () {
+      const interrupted = DownloadFailureException(1008);
+      const conflict = DownloadFailureException(1009);
+      expect(interrupted.description, contains('could not resume'));
+      expect(interrupted.isRetryableSourceFailure, isTrue);
+      expect(conflict.description, 'the file already exists');
+      expect(conflict.isRetryableSourceFailure, isFalse);
+    },
+  );
+
+  test(
     'local file checks open raw and encoded paths, reject missing/empty files',
     () async {
       final directory = await Directory.systemTemp.createTemp(
@@ -35,6 +47,54 @@ void main() {
   final messenger =
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
   tearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+  test(
+    'Android waiting reasons are visible and clear when transfer progresses',
+    () async {
+      final states = <Map<String, Object>>[
+        {'state': 'queued'},
+        {'state': 'paused', 'reason': 1},
+        {'state': 'paused', 'reason': 2},
+        {'state': 'paused', 'reason': 3},
+        {'state': 'downloading', 'downloaded': 1, 'total': 3},
+        {'state': 'complete', 'localPath': '/movie.mp4'},
+      ];
+      messenger.setMockMethodCallHandler(
+        channel,
+        (call) async =>
+            call.method == 'status' ? states.removeAt(0) : '/movie.mp4',
+      );
+      final service = AndroidSystemDownloadService();
+      final messages = <String?>[];
+      await service.resume(
+        jobId: 'movie',
+        platformId: '1986',
+        onProgress: (_, _) => messages.add(service.downloadStatus('movie')),
+      );
+      expect(messages, [
+        contains('Waiting for Android'),
+        contains('waiting to retry'),
+        contains('network connection'),
+        contains('Wi-Fi'),
+        null,
+        null,
+      ]);
+      expect(service.downloadStatus('movie'), isNull);
+    },
+  );
+
+  test(
+    'Android deletion failure is propagated instead of discarding the record',
+    () async {
+      messenger.setMockMethodCallHandler(channel, (_) async => false);
+      await expectLater(
+        AndroidSystemDownloadService().delete('/movie.mp4'),
+        throwsA(isA<StateError>()),
+      );
+      messenger.setMockMethodCallHandler(channel, (_) async => true);
+      await AndroidSystemDownloadService().delete('/movie.mp4');
+    },
+  );
 
   test(
     'retention failure keeps the readable original and reports a warning',

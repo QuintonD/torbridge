@@ -12,7 +12,7 @@ class DownloadFailureException implements Exception {
 
   final int reason;
 
-  bool get isRetryableHttpFailure =>
+  bool get isRetryableSourceFailure =>
       reason == 401 ||
       reason == 403 ||
       reason == 404 ||
@@ -21,7 +21,8 @@ class DownloadFailureException implements Exception {
       reason == 429 ||
       reason >= 500 && reason <= 599 ||
       reason == 1002 ||
-      reason == 1004;
+      reason == 1004 ||
+      reason == 1008;
 
   String get description => switch (reason) {
     >= 400 && <= 599 => 'HTTP $reason${_httpLabel(reason)}',
@@ -32,7 +33,8 @@ class DownloadFailureException implements Exception {
     1005 => 'too many redirects',
     1006 => 'insufficient storage',
     1007 => 'the target device was unavailable',
-    1008 => 'the file already exists',
+    1008 => 'Android could not resume the interrupted download',
+    1009 => 'the file already exists',
     _ => 'Android error $reason',
   };
 
@@ -81,6 +83,9 @@ abstract class DownloadService {
 
   String? localFileWarning(String path) => null;
 
+  /// Explains a system-managed wait without treating it as a failed download.
+  String? downloadStatus(String jobId) => null;
+
   Future<String> download({
     required String jobId,
     required Uri url,
@@ -109,6 +114,10 @@ abstract class DownloadService {
 class AndroidSystemDownloadService extends DownloadService {
   static const _channel = MethodChannel('app.torbridge/downloads');
   final Map<String, String> _retentionWarnings = {};
+  final Map<String, String> _downloadStatuses = {};
+
+  @override
+  String? downloadStatus(String jobId) => _downloadStatuses[jobId];
 
   @override
   String? localFileWarning(String path) => _retentionWarnings[path];
@@ -156,7 +165,7 @@ class AndroidSystemDownloadService extends DownloadService {
     final id = (result?['id'] as num?)?.toInt();
     if (id == null) throw StateError('Android did not create the download.');
     onEnqueued?.call('$id');
-    return _waitForDownload(id, onProgress);
+    return _waitForDownload(jobId, id, onProgress);
   }
 
   @override
@@ -167,10 +176,23 @@ class AndroidSystemDownloadService extends DownloadService {
   }) async {
     final id = int.tryParse(platformId);
     if (id == null) throw StateError('Invalid Android download ID.');
-    return _waitForDownload(id, onProgress);
+    return _waitForDownload(jobId, id, onProgress);
   }
 
   Future<String> _waitForDownload(
+    String jobId,
+    int id,
+    DownloadProgressCallback onProgress,
+  ) async {
+    try {
+      return await _pollDownload(jobId, id, onProgress);
+    } finally {
+      _downloadStatuses.remove(jobId);
+    }
+  }
+
+  Future<String> _pollDownload(
+    String jobId,
     int id,
     DownloadProgressCallback onProgress,
   ) async {
@@ -182,6 +204,21 @@ class AndroidSystemDownloadService extends DownloadService {
       if (status == null) throw StateError('Android lost the download record.');
       final received = (status['downloaded'] as num?)?.toInt() ?? 0;
       final total = (status['total'] as num?)?.toInt() ?? -1;
+      final message = switch (status['state']) {
+        'queued' => 'Waiting for Android to start the download…',
+        'paused' => switch (status['reason']) {
+          1 => 'Connection interrupted — Android is waiting to retry…',
+          2 => 'Waiting for a network connection…',
+          3 => 'Waiting for Wi-Fi…',
+          _ => 'Download paused by Android…',
+        },
+        _ => null,
+      };
+      if (message == null) {
+        _downloadStatuses.remove(jobId);
+      } else {
+        _downloadStatuses[jobId] = message;
+      }
       onProgress(received, total);
       switch (status['state']) {
         case 'complete':
@@ -213,7 +250,14 @@ class AndroidSystemDownloadService extends DownloadService {
 
   @override
   Future<void> delete(String localPath) async {
-    await _channel.invokeMethod<void>('delete', {'path': localPath});
+    final deleted = await _channel.invokeMethod<bool>('delete', {
+      'path': localPath,
+    });
+    if (deleted != true) {
+      throw StateError(
+        'Android could not delete the downloaded file. The record was kept; try again.',
+      );
+    }
   }
 }
 

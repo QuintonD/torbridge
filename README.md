@@ -1,42 +1,72 @@
 # TorBridge
 
-TorBridge is an Android and Windows companion for a TorBox + AIOStreams +
-Stremio + Trakt setup. Search for a movie or exact series episode, let the app
-rank the available files, download the best match, then play the local file in
-Stremio so Stremio remains the owner of playback and Trakt scrobbling.
+**Find the right source. Keep it offline. Choose how to watch.**
 
-The current v1.2 build is usable without credentials in demo mode. Live mode
-uses your configured AIOStreams manifest and TorBox account; Trakt is optional.
+A TorBox companion for Android and Windows, with AIOStreams discovery, local
+video downloads, built-in playback, Stremio integration, and optional Trakt sync.
 
-## Installable builds
+[![Latest release](https://img.shields.io/github/v/release/QuintonD/torbridge?color=8b7cf8)](https://github.com/QuintonD/torbridge/releases/latest)
+[![Release downloads](https://img.shields.io/github/downloads/QuintonD/torbridge/total?color=65c8aa)](https://github.com/QuintonD/torbridge/releases)
 
-- `dist/TorBridge-Android-1.2.9-arm64.apk` — smaller Android APK for ARM64 phones,
-  including Pixel 7a and Galaxy S25. Install over the existing app.
-- `dist/TorBridge-Android-1.2.9.apk` — sideloadable Android APK (Android 7+
-  by Flutter's current minimum; tested on API 30, 34, and 36).
-- `dist/TorBridge-Windows-x64-1.2.7.zip` — extract the complete archive and run
-  `torbridge.exe`. Do not move the executable away from its adjacent DLL and
-  `data` files.
+[Download](#download) · [Update guide](docs/updating.md) · [Changelog](CHANGELOG.md) · [Report a bug](https://github.com/QuintonD/torbridge/issues/new?template=bug_report.yml)
 
-The Android artifact is an optimized release build signed with a development
-key. It is appropriate for personal sideloading, not Play Store distribution.
+## Download
 
-The 1.2.7 UI update adds visible player choices, download status filters,
-responsive headers, and clearer search controls. See the [UI pass](docs/ui-pass/README.md)
-for rendered previews and the imagegen design reference. Install the Android APK
-over the existing app to retain app data; do not uninstall first.
+| Your device | Current build | Download |
+| --- | --- | --- |
+| **Pixel 7a, Galaxy S25, and other ARM64 phones** | Android **1.2.10**, 42.4 MB | **[Download ARM64 APK](https://github.com/QuintonD/torbridge/releases/download/v1.2.10/TorBridge-Android-1.2.10-arm64.apk)** |
+| Other supported Android architectures | Android **1.2.10**, 120.8 MB | [Download universal APK](https://github.com/QuintonD/torbridge/releases/download/v1.2.10/TorBridge-Android-1.2.10.apk) |
+| Windows x64 | Windows **1.2.7**, 34.0 MB | [Download Windows ZIP](https://github.com/QuintonD/torbridge/releases/download/v1.2.7/TorBridge-Windows-x64-1.2.7.zip) |
 
-Android 1.2.9 moves completed downloads into TorBridge's own library so Android
-Download Manager cleanup cannot remove the retained video. Open the updated app
-once on each device to migrate existing readable downloads. Unavailable files
-remain under **Downloads → Needs attention**, with **Retry download**. See the
-[retention fix](docs/android-download-retention.md) and earlier
-[download recovery notes](docs/android-download-recovery.md).
+[Latest Android release notes](https://github.com/QuintonD/torbridge/releases/tag/v1.2.10) · [SHA-256 checksums](https://github.com/QuintonD/torbridge/releases/download/v1.2.10/SHA256SUMS.txt) · [All releases](https://github.com/QuintonD/torbridge/releases)
 
-Build the smaller APK with `./tool/build_android.ps1 -Arm64`. Both Android
-artifacts use the same signing key and version code, so switching between
-universal and ARM64 builds does not prevent future updates. Updating the app
-does not re-download its saved videos.
+### Updating an existing installation
+
+**Android:** download the APK above and install it over TorBridge. **Do not
+uninstall or clear app storage.** The APK is also the update file; both Android
+variants use the same signing certificate. Open the app after updating and run
+**Diagnostics → Run checks**. Updating does not re-download missing videos.
+
+**Windows:** close TorBridge, extract the entire ZIP into a new folder, and run
+`torbridge.exe`. Keep the included DLLs and `data` folder together.
+
+See the [installation and update guide](docs/updating.md) for details. GitHub's
+**Source code** archives are for development, not installation. Android builds
+are signed for personal sideloading and are not distributed through Google Play.
+
+### What's new in Android 1.2.10
+
+Interrupted downloads were incorrectly reported as “file already exists.” This
+update corrects the message and enables source refresh and TorBox recovery for
+that failure. Retry lookups have timeouts, Android network waits have clear
+status messages, and unsuccessful deletion keeps the download record visible.
+
+Install the update, then retry one affected video while online and check playback.
+The previous library retention protection remains in place.
+[Read the investigation and validation](docs/android-download-retry.md).
+
+## A look inside
+
+<p align="center">
+  <img src="docs/assets/windows-home.png" width="680" alt="TorBridge desktop discovery and recommended download in demo mode">
+  <img src="docs/ui-pass/downloads-430.png" width="260" alt="TorBridge mobile downloads with Play, Stremio, and external-player choices">
+</p>
+
+*Desktop demo and mobile layout previews. More [interface screenshots](docs/ui-pass/README.md).*
+
+## What TorBridge does
+
+- Ranks sources against your quality, size, codec, audio, and subtitle preferences.
+- Downloads exact movies and episodes, with recovery for supported source failures.
+- Keeps completed Android videos in an offline library protected from Download
+  Manager's original-file cleanup.
+- Plays locally in TorBridge or hands a video to Stremio or another player.
+- Supports optional Trakt sync and encrypted desktop-to-phone setup transfer.
+
+Explore demo mode without credentials. Live discovery and downloads use your
+AIOStreams configuration and TorBox account; Trakt is optional. Direct external
+playback does not guarantee Trakt attribution. Only access media you are
+licensed or otherwise authorized to download or watch.
 
 ## First run
 

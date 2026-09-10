@@ -799,7 +799,12 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     );
     _replaceJob(job);
     try {
-      final url = await _downloadUrl(job.source);
+      final url = await _downloadUrl(job.source).timeout(
+        const Duration(seconds: 60),
+        onTimeout: () => throw StateError(
+          'Getting the download link timed out. Retry the download.',
+        ),
+      );
       String localPath;
       try {
         localPath = await _downloadFromUrl(
@@ -855,6 +860,9 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     void Function(DownloadJob updated) onJobChanged, {
     Map<String, String>? requestHeaders,
   }) {
+    if (!mounted || !state.downloads.any((item) => item.id == job.id)) {
+      return Future.error(StateError('Download cancelled.'));
+    }
     var current = job;
     return _downloadService.download(
       jobId: job.id,
@@ -862,13 +870,22 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
       suggestedName: _downloadFilename(job),
       requestHeaders: requestHeaders ?? job.source.requestHeaders,
       onEnqueued: (platformId) {
+        if (!mounted || !state.downloads.any((item) => item.id == job.id)) {
+          unawaited(
+            _downloadService.cancel(jobId: job.id, platformId: platformId),
+          );
+          return;
+        }
         current = current.copyWith(platformId: platformId);
         onJobChanged(current);
         _replaceJob(current);
       },
       onProgress: (received, total) {
         final progress = total > 0 ? received / total : 0.0;
-        current = current.copyWith(progress: progress.clamp(0, 1));
+        current = current.copyWith(
+          progress: progress.clamp(0, 1),
+          error: _downloadService.downloadStatus(job.id),
+        );
         onJobChanged(current);
         _replaceJob(current, persist: false);
       },
@@ -880,7 +897,10 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     DownloadFailureException originalError,
     void Function(DownloadJob updated) onJobChanged,
   ) async {
-    if (!originalError.isRetryableHttpFailure) throw originalError;
+    if (!originalError.isRetryableSourceFailure) throw originalError;
+    if (!mounted || !state.downloads.any((item) => item.id == job.id)) {
+      throw StateError('Download cancelled.');
+    }
     var current = job;
     await _downloadService.cancel(
       jobId: current.id,
@@ -988,7 +1008,7 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
 
   bool _canRetryThroughTorBox(DownloadFailureException error) {
     final token = state.connections.torBoxToken;
-    return error.isRetryableHttpFailure && token != null && token.isNotEmpty;
+    return error.isRetryableSourceFailure && token != null && token.isNotEmpty;
   }
 
   Future<void> retryDownload(DownloadJob job) async {
@@ -1004,6 +1024,15 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
         return;
       }
       _replaceJob(current.copyWith(status: DownloadStatus.queued, error: null));
+      // Retire the previous Android job before losing its ID. A retry starts
+      // from zero, including when Android cannot resume a partial transfer.
+      if (current.platformId != null) {
+        await _downloadService.cancel(
+          jobId: current.id,
+          platformId: current.platformId,
+        );
+      }
+      if (!mounted || !state.downloads.any((item) => item.id == job.id)) return;
       final refreshed = await _refreshSource(current);
       final latest = state.downloads
           .where((item) => item.id == job.id)
@@ -1367,7 +1396,12 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
   }
 
   Future<List<StreamCandidate>> _fetchSourcesForJob(DownloadJob job) async {
-    return _fetchSources(job.mediaTitle, job.mediaVideo);
+    // A slow addon must not indefinitely block retrying a saved source or
+    // requesting a fresh TorBox link. Late results cannot start a transfer.
+    return _fetchSources(job.mediaTitle, job.mediaVideo).timeout(
+      const Duration(seconds: 30),
+      onTimeout: () => const <StreamCandidate>[],
+    );
   }
 
   Future<List<StreamCandidate>> _fetchSources(
@@ -1717,6 +1751,7 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
         onProgress: (received, total) {
           job = job.copyWith(
             progress: total > 0 ? (received / total).clamp(0, 1) : 0,
+            error: _downloadService.downloadStatus(job.id),
           );
           _replaceJob(job, persist: false);
         },
@@ -1804,7 +1839,7 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
   }
 
   Map<String, dynamic> _jobToRecord(DownloadJob job) => {
-    'schema': 2,
+    'schema': 3,
     'id': job.id,
     'title': job.title,
     'status': job.status.name,
@@ -1914,7 +1949,13 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
             progress: (record['progress'] as num?)?.toDouble() ?? 1,
             localPath: record['localPath'] as String?,
             platformId: record['platformId'] as String?,
-            error: record['error'] as String?,
+            // Before 1.2.10 this exact text was emitted for Android 1008.
+            // Schema 3 distinguishes newly recorded, genuine 1009 conflicts.
+            error:
+                ((record['schema'] as num?)?.toInt() ?? 1) < 3 &&
+                    record['error'] == 'the file already exists'
+                ? const DownloadFailureException(1008).description
+                : record['error'] as String?,
             createdAt: _date(record['createdAt']),
             completedAt: _date(record['completedAt']),
             watchedAt: _date(record['watchedAt']),

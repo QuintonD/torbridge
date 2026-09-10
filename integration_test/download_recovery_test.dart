@@ -11,6 +11,80 @@ void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
   testWidgets(
+    'interrupted Android transfer is 1008 and can restart after deletion',
+    (tester) async {
+      await tester.pumpWidget(const MaterialApp(home: SizedBox()));
+      final bytes = List<int>.generate(1024, (i) => i % 256);
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      var interrupt = true;
+      final subscription = server.listen((request) async {
+        if (interrupt) {
+          // Missing ETag makes this deliberately truncated response impossible
+          // for DownloadManager to resume. Exercise the real platform reason.
+          final socket = await request.response.detachSocket(
+            writeHeaders: false,
+          );
+          socket.add(
+            'HTTP/1.1 200 OK\r\nContent-Length: 1024\r\nConnection: close\r\n\r\n'
+                .codeUnits,
+          );
+          socket.add(bytes.sublist(0, 128));
+          await socket.flush();
+          await socket.close();
+        } else {
+          request.response.contentLength = bytes.length;
+          request.response.add(bytes);
+          await request.response.close();
+        }
+      });
+      final service = AndroidSystemDownloadService();
+      String? id;
+      Future<String> download() => service
+          .download(
+            jobId: 'interrupted-fixture',
+            url: Uri.parse('http://127.0.0.1:${server.port}/fixture.mp4'),
+            suggestedName: 'interrupted-same-name.mp4',
+            onProgress: (_, _) {},
+            onEnqueued: (value) => id = value,
+          )
+          .timeout(const Duration(seconds: 45));
+      try {
+        await expectLater(
+          download(),
+          throwsA(
+            isA<DownloadFailureException>().having(
+              (e) => e.reason,
+              'Android reason',
+              1008,
+            ),
+          ),
+        );
+        final failedId = id;
+        await service.cancel(jobId: 'interrupted-fixture', platformId: id);
+        interrupt = false;
+        final path = await download();
+        expect(id, isNot(failedId));
+        expect(await File(path).readAsBytes(), bytes);
+        await service.cancel(jobId: 'interrupted-fixture', platformId: id);
+        await service.delete(path); // Already gone is a successful deletion.
+        expect(
+          await service.resolveLocalPath(localPath: path, platformId: id),
+          isNull,
+        );
+        final replacement = await download();
+        expect(replacement, isNot(path));
+        expect(await File(replacement).readAsBytes(), bytes);
+      } finally {
+        if (id != null) {
+          await service.cancel(jobId: 'interrupted-fixture', platformId: id);
+        }
+        await subscription.cancel();
+        await server.close(force: true);
+      }
+    },
+  );
+
+  testWidgets(
     'Android resolves saved downloads and serves file/content ranges',
     (tester) async {
       await tester.pumpWidget(const MaterialApp(home: SizedBox()));
@@ -227,6 +301,9 @@ void main() {
         ),
         migratedPath,
       );
+      await service.delete(legacy.path);
+      expect(await File(migratedPath).exists(), isFalse);
+      expect(await service.resolveLocalPath(localPath: legacy.path), isNull);
     } finally {
       if (id != null) {
         await service.cancel(jobId: 'receiver-fixture', platformId: '$id');

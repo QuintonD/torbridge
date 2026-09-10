@@ -78,7 +78,16 @@ class TorBoxFileSelection {
 
 class TorBoxClient {
   TorBoxClient(this._apiToken, {Dio? dio})
-    : _dio = dio ?? Dio(BaseOptions(baseUrl: 'https://api.torbox.app'));
+    : _dio =
+          dio ??
+          Dio(
+            BaseOptions(
+              baseUrl: 'https://api.torbox.app',
+              connectTimeout: const Duration(seconds: 15),
+              receiveTimeout: const Duration(seconds: 30),
+              sendTimeout: const Duration(seconds: 15),
+            ),
+          );
 
   final String _apiToken;
   final Dio _dio;

@@ -64,13 +64,18 @@ class MainActivity : FlutterActivity() {
                         val id = call.argument<Number>("id")?.toLong()
                         if (id == null) {
                             result.error("invalid_id", "A download ID is required.", null)
-                        } else {
+                        } else try {
                             synchronized(LocalDownloadAccess.lock) {
+                                val savedPath = downloadPath(id)
                                 manager().remove(id)
-                                downloadPath(id)?.let { File(it).delete() }
+                                if (savedPath != null && !deletePath(savedPath)) {
+                                    throw java.io.IOException("Could not delete the previous download. Try again.")
+                                }
                                 forgetDownload(id)
                             }
                             result.success(null)
+                        } catch (error: Exception) {
+                            result.error("delete_failed", error.message, null)
                         }
                     }
                     "delete" -> {
@@ -213,14 +218,25 @@ class MainActivity : FlutterActivity() {
             .edit().remove("path_$id").remove("retained_$id").apply()
     }
 
-    private fun deletePath(value: String): Boolean {
-        return try {
+    private fun deletePath(value: String): Boolean = synchronized(LocalDownloadAccess.lock) {
+        try {
             val uri = Uri.parse(value)
             if (uri.scheme == "content") {
-                contentResolver.delete(uri, null, null) > 0
+                val removed = contentResolver.delete(uri, null, null)
+                // Deletion is idempotent for an already-removed DownloadManager
+                // record (cancel may have removed it just before this call).
+                removed > 0 || (uri.authority == "downloads" &&
+                    uri.lastPathSegment?.toLongOrNull()?.let { id ->
+                        manager().query(DownloadManager.Query().setFilterById(id)).use {
+                            !it.moveToFirst()
+                        }
+                    } == true)
             } else {
                 val file = if (uri.scheme == "file") File(uri.path ?: value) else File(value)
-                !file.exists() || file.delete()
+                // Flutter may still hold the pre-retention path after a crash.
+                val retained = DownloadRetention(this).recovered(file)?.let { File(it) }
+                val retainedDeleted = retained == null || !retained.exists() || retained.delete()
+                retainedDeleted && (!file.exists() || file.delete())
             }
         } catch (_: Exception) {
             false

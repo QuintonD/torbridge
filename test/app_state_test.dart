@@ -15,6 +15,124 @@ import 'package:torbridge/services/setup_transfer_service.dart';
 import 'package:torbridge/services/stremio_bridge_service.dart';
 
 void main() {
+  for (final schema in [2, 3]) {
+    test(
+      'saved error migration distinguishes old and new records: $schema',
+      () async {
+        final store = _MemoryStateStore()
+          ..value = StoredLocalState(
+            downloadRecords: [
+              {
+                'schema': schema,
+                'id': 'saved',
+                'title': 'Saved movie',
+                'status': 'failed',
+                'error': 'the file already exists',
+                'platformId': '1986',
+                'mediaTitle': {
+                  'id': 'tt0263757',
+                  'type': 'movie',
+                  'name': 'Saved movie',
+                },
+                'source': {
+                  'addonName': 'Test',
+                  'displayName': 'movie.mp4',
+                  'description': '',
+                },
+              },
+            ],
+          );
+        final controller = TorBridgeController(
+          _RecordingDownloadService(),
+          _FakeBridge(),
+          _EmptyCredentials(),
+          CinemetaClient(),
+          AioStreamsClient(),
+          store,
+        );
+        addTearDown(controller.dispose);
+        await controller.initialize();
+        expect(
+          controller.state.downloads.single.error,
+          schema == 2
+              ? contains('could not resume')
+              : 'the file already exists',
+        );
+        expect(controller.state.downloads.single.platformId, '1986');
+      },
+    );
+  }
+
+  for (final cancel in [false, true]) {
+    testWidgets(
+      'slow retry lookup is bounded and respects cancellation: $cancel',
+      (tester) async {
+        final service = _DestinationConflictService();
+        final addon = _SlowAioStreamsClient();
+        final credentials = _MemoryCredentials()
+          ..value = const StoredConnections(
+            aioManifestUrl: 'https://aio.example/manifest.json',
+            torBoxToken: 'token',
+          );
+        final controller = TorBridgeController(
+          service,
+          _FakeBridge(),
+          credentials,
+          CinemetaClient(),
+          addon,
+          _MemoryStateStore(),
+        );
+        await controller.initialize();
+        await controller.downloadCandidate(_fallbackCandidate);
+        addon.slow = true;
+        service.release.complete();
+        final retry = controller.retryDownload(
+          controller.state.downloads.single,
+        );
+        await tester.pump();
+        expect(controller.state.downloads.single.status, DownloadStatus.queued);
+        expect(service.cancelled, ['failed-attempt']);
+        if (cancel) {
+          await controller.cancelDownload(controller.state.downloads.single);
+        }
+        await tester.pump(const Duration(seconds: 31));
+        await retry;
+        expect(service.calls, cancel ? 1 : 2);
+        if (cancel) {
+          expect(controller.state.downloads, isEmpty);
+        } else {
+          expect(
+            controller.state.downloads.single.status,
+            DownloadStatus.complete,
+          );
+        }
+        // A response arriving after timeout must never start another transfer.
+        addon.response.complete([]);
+        await tester.pump();
+        expect(service.calls, cancel ? 1 : 2);
+        controller.dispose();
+      },
+    );
+  }
+
+  test('failed file deletion keeps the download record', () async {
+    final service = _UndeletableDownloadService();
+    final controller = TorBridgeController(
+      service,
+      _FakeBridge(),
+      _EmptyCredentials(),
+      CinemetaClient(),
+      AioStreamsClient(),
+      _MemoryStateStore(),
+    );
+    addTearDown(controller.dispose);
+    await controller.initialize();
+    await controller.downloadCandidate(_fallbackCandidate);
+    await controller.deleteDownload(controller.state.downloads.single);
+    expect(controller.state.downloads, hasLength(1));
+    expect(controller.state.notice, contains('Could not delete'));
+  });
+
   test('local destination errors do not blame the host and double retry starts one transfer', () async {
     final service = _DestinationConflictService();
     final controller = TorBridgeController(
@@ -35,6 +153,7 @@ void main() {
     final secondRetry = controller.retryDownload(failed);
     await service.retryStarted.future;
     expect(service.calls, 2); // One original failure and exactly one retry.
+    expect(service.cancelled, ['failed-attempt']);
     service.release.complete();
     await Future.wait([firstRetry, secondRetry]);
     expect(controller.state.downloads.single.status, DownloadStatus.complete);
@@ -202,44 +321,46 @@ void main() {
     expect(controller.state.downloads, isEmpty);
   });
 
-  test('HTTP 502 direct source retries with a fresh TorBox link', () async {
-    final downloads = _RetryingDownloadService();
-    final credentials = _MemoryCredentials()
-      ..value = const StoredConnections(torBoxToken: 'token');
-    final torBox = _FakeTorBoxClient();
-    final controller = TorBridgeController(
-      downloads,
-      _FakeBridge(),
-      credentials,
-      CinemetaClient(),
-      AioStreamsClient(),
-      _MemoryStateStore(),
-      (_) => torBox,
-    );
-    addTearDown(controller.dispose);
-    await controller.initialize();
+  for (final reason in [502, 1008]) {
+    test('Android failure $reason retries with a fresh TorBox link', () async {
+      final downloads = _RetryingDownloadService(reason);
+      final credentials = _MemoryCredentials()
+        ..value = const StoredConnections(torBoxToken: 'token');
+      final torBox = _FakeTorBoxClient();
+      final controller = TorBridgeController(
+        downloads,
+        _FakeBridge(),
+        credentials,
+        CinemetaClient(),
+        AioStreamsClient(),
+        _MemoryStateStore(),
+        (_) => torBox,
+      );
+      addTearDown(controller.dispose);
+      await controller.initialize();
 
-    await controller.downloadCandidate(_fallbackCandidate);
+      await controller.downloadCandidate(_fallbackCandidate);
 
-    expect(downloads.urls, [
-      Uri.parse('https://streams.example/stale'),
-      Uri.parse('https://torbox.example/fresh'),
-    ]);
-    expect(downloads.cancelledPlatformIds, ['direct-id']);
-    expect(downloads.headers, [
-      {'Referer': 'https://source.example/'},
-      isEmpty,
-    ]);
-    expect(controller.state.downloads.single.status, DownloadStatus.complete);
-    expect(controller.state.downloads.single.platformId, 'fallback-id');
-    expect(torBox.requestedTorrentId, 42);
-    expect(torBox.requestedFileId, 7);
-  });
+      expect(downloads.urls, [
+        Uri.parse('https://streams.example/stale'),
+        Uri.parse('https://torbox.example/fresh'),
+      ]);
+      expect(downloads.cancelledPlatformIds, ['direct-id']);
+      expect(downloads.headers, [
+        {'Referer': 'https://source.example/'},
+        isEmpty,
+      ]);
+      expect(controller.state.downloads.single.status, DownloadStatus.complete);
+      expect(controller.state.downloads.single.platformId, 'fallback-id');
+      expect(torBox.requestedTorrentId, 42);
+      expect(torBox.requestedFileId, 7);
+    });
+  }
 
   test('Android HTTP reason is rendered as a useful error', () {
     const error = DownloadFailureException(502);
 
-    expect(error.isRetryableHttpFailure, isTrue);
+    expect(error.isRetryableSourceFailure, isTrue);
     expect(error.toString(), 'HTTP 502 (Bad Gateway)');
   });
 
@@ -514,6 +635,7 @@ final _urlOnlyCandidate = StreamCandidate(
 
 class _DestinationConflictService extends DownloadService {
   int calls = 0;
+  final List<String?> cancelled = [];
   final retryStarted = Completer<void>();
   final release = Completer<void>();
 
@@ -527,10 +649,18 @@ class _DestinationConflictService extends DownloadService {
     Map<String, String> requestHeaders = const {},
   }) async {
     calls++;
-    if (calls == 1) throw const DownloadFailureException(1008);
+    if (calls == 1) {
+      onEnqueued?.call('failed-attempt');
+      throw const DownloadFailureException(1009);
+    }
     retryStarted.complete();
     await release.future;
     return 'C:/TorBridge/retained.mp4';
+  }
+
+  @override
+  Future<void> cancel({required String jobId, String? platformId}) async {
+    cancelled.add(platformId);
   }
 }
 
@@ -557,7 +687,33 @@ class _RecordingDownloadService extends DownloadService {
   Future<void> delete(String localPath) async => deleted.add(localPath);
 }
 
+class _UndeletableDownloadService extends _RecordingDownloadService {
+  @override
+  Future<void> delete(String localPath) async =>
+      throw StateError('File is locked.');
+}
+
+class _SlowAioStreamsClient extends AioStreamsClient {
+  bool slow = false;
+  final response = Completer<List<StreamCandidate>>();
+
+  @override
+  Future<List<StreamCandidate>> getStreams({
+    required Uri manifestUrl,
+    required String type,
+    required String videoId,
+  }) async => slow ? response.future : [_fallbackCandidate];
+
+  @override
+  Future<List<StreamCandidate>> getTorrentioStreams({
+    required String type,
+    required String videoId,
+  }) async => [];
+}
+
 class _RetryingDownloadService extends DownloadService {
+  _RetryingDownloadService([this.reason = 502]);
+  final int reason;
   final List<Uri> urls = [];
   final List<String?> cancelledPlatformIds = [];
   final List<Map<String, String>> headers = [];
@@ -575,7 +731,7 @@ class _RetryingDownloadService extends DownloadService {
     headers.add(requestHeaders);
     if (urls.length == 1) {
       onEnqueued?.call('direct-id');
-      throw const DownloadFailureException(502);
+      throw DownloadFailureException(reason);
     }
     onEnqueued?.call('fallback-id');
     onProgress(1, 1);

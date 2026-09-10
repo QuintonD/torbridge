@@ -1,0 +1,39 @@
+name: Bug report
+description: Report a reproducible TorBridge problem.
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: "Please omit API tokens, configured addon URLs, pairing codes, and personal account details."
+  - type: input
+    id: version
+    attributes:
+      label: TorBridge version and APK variant
+      placeholder: "1.2.10 ARM64"
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Device and operating system
+      placeholder: "Pixel 7a, Android version; or Windows version"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps and actual result
+      description: "Include the exact error and whether the problem survives restarting the app."
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics and screenshots
+      description: "For download problems, include the visible status, Wi-Fi/mobile connection, free storage, and how files were deleted. Remove private details."
