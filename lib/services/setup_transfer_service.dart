@@ -223,7 +223,8 @@ class SetupTransferService {
       final response = Map<String, dynamic>.from(jsonDecode(line) as Map);
       if (response['ok'] != true) {
         throw SetupTransferException(
-          response['error'] as String? ?? 'The desktop rejected this transfer.',
+          response['error'] as String? ??
+              'The sending device rejected this transfer.',
         );
       }
       final box = SecretBox(
@@ -254,11 +255,11 @@ class SetupTransferService {
       );
     } on TimeoutException {
       throw const SetupTransferException(
-        'The desktop did not respond. Keep both devices on the same network.',
+        'The sending device did not respond. Keep its QR screen open and both devices unlocked on the same Wi-Fi.',
       );
     } on SocketException {
       throw const SetupTransferException(
-        'Could not reach the desktop. Keep both devices on the same network and allow TorBridge through the firewall.',
+        'Could not reach the sending device. Keep its QR screen open and both devices on the same Wi-Fi. Guest Wi-Fi or a VPN may block local connections. For a desktop sender, check its firewall. If the QR was used or expired, create a new one.',
       );
     } on StateError {
       throw const SetupTransferException(
@@ -291,6 +292,7 @@ class SetupTransferService {
   }
 
   Future<void> _handleClient(Socket socket) async {
+    final generation = _generation;
     try {
       final line = await utf8.decoder
           .bind(socket)
@@ -298,6 +300,10 @@ class SetupTransferService {
           .first
           .timeout(const Duration(seconds: 5));
       final request = Map<String, dynamic>.from(jsonDecode(line) as Map);
+      if (generation != _generation) {
+        await _send(socket, {'ok': false, 'error': 'Pairing session ended.'});
+        return;
+      }
       final expired =
           _expiresAt == null || DateTime.now().toUtc().isAfter(_expiresAt!);
       if (expired) {
@@ -339,7 +345,9 @@ class SetupTransferService {
         'nonce': _base64Url(box.nonce),
         'mac': _base64Url(box.mac.bytes),
       });
-      unawaited(stopOffer());
+      // A receiver can finish and open another offer before this flush returns.
+      // An old client's cleanup must never cancel the new pairing session.
+      if (generation == _generation) unawaited(stopOffer());
     } on Object {
       try {
         await _send(socket, {'ok': false, 'error': 'Invalid pairing request.'});

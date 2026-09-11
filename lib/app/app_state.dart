@@ -799,7 +799,7 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
         preferences: bundle.preferences,
         demoMode: !live,
         connectionPhase: live ? ConnectionPhase.ready : ConnectionPhase.idle,
-        notice: 'Desktop setup imported securely.',
+        notice: 'Setup imported securely.',
       );
       if (live) {
         unawaited(_loadSources(state.selectedTitle, state.selectedVideo));

@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
@@ -14,9 +15,55 @@ import 'package:torbridge/domain/media_models.dart';
 import 'package:torbridge/services/credential_store.dart';
 import 'package:torbridge/services/download_service.dart';
 import 'package:torbridge/services/local_state_store.dart';
+import 'package:torbridge/services/setup_transfer_service.dart';
+import 'package:torbridge/features/settings/settings_screen.dart';
 import 'package:torbridge/services/stremio_bridge_service.dart';
 
 void main() {
+  for (final platform in [TargetPlatform.android, TargetPlatform.windows]) {
+    testWidgets('setup sender fits small screen on $platform', (tester) async {
+      debugDefaultTargetPlatformOverride = platform;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      tester.view.physicalSize = const Size(360, 640);
+      tester.view.devicePixelRatio = 1;
+      tester.platformDispatcher.textScaleFactorTestValue = 1.4;
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final transfer = _PreviewTransferService();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            credentialStoreProvider.overrideWithValue(_MemoryCredentialStore()),
+            downloadServiceProvider.overrideWithValue(_FakeDownloadService()),
+            localStateStoreProvider.overrideWithValue(_MemoryLocalStateStore()),
+            stremioBridgeProvider.overrideWithValue(_FakeStremioBridge()),
+            setupTransferServiceProvider.overrideWithValue(transfer),
+          ],
+          child: const MaterialApp(home: Scaffold(body: SettingsScreen())),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final show = find.byKey(const Key('show-setup-qr'));
+      expect(show, findsOneWidget);
+      expect(
+        find.byKey(const Key('scan-setup-qr')),
+        platform == TargetPlatform.android ? findsOneWidget : findsNothing,
+      );
+      await tester.ensureVisible(show);
+      await tester.tap(show);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('setup-qr-code')), findsOneWidget);
+      expect(find.text('123456'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.text('Close'));
+      await tester.pumpAndSettle();
+      expect(transfer.stopped, isTrue);
+      expect(find.byKey(const Key('setup-qr-code')), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    });
+  }
   setUpAll(() async {
     final fontDirectory = Platform.environment['TORBRIDGE_FONT_DIR'];
     if (Platform.environment['TORBRIDGE_UI_CAPTURE'] == '1' &&
@@ -290,6 +337,24 @@ void main() {
     container.dispose();
     await tester.pump();
   });
+}
+
+class _PreviewTransferService extends SetupTransferService {
+  bool stopped = false;
+
+  @override
+  Future<SetupTransferOffer> startOffer(SetupTransferBundle bundle) async =>
+      SetupTransferOffer(
+        uri: Uri.parse('torbridge://pair?v=1&host=192.168.1.2&port=1234'),
+        verificationCode: '123456',
+        expiresAt: DateTime.now().add(const Duration(minutes: 5)),
+        includedItems: bundle.includedItems,
+      );
+
+  @override
+  Future<void> stopOffer() async {
+    stopped = true;
+  }
 }
 
 const _widgetSeries = CatalogTitle(
