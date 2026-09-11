@@ -21,17 +21,19 @@ class ServiceFailure implements Exception {
     required this.stage,
     this.host,
     this.status,
+    this.retryAfter,
   });
   final NetworkFailureKind kind;
   final String stage;
   final String? host;
   final int? status;
+  final Duration? retryAfter;
 
   bool get canWaitForNetwork => switch (kind) {
     NetworkFailureKind.dns ||
     NetworkFailureKind.connection ||
     NetworkFailureKind.timeout => true,
-    _ => false,
+    _ => status == 429,
   };
 
   static ServiceFailure from(
@@ -70,7 +72,21 @@ class ServiceFailure implements Exception {
       stage: stage,
       host: host?.isEmpty == true ? null : host,
       status: code,
+      retryAfter: code == 429
+          ? _retryAfter(dio?.response?.headers['retry-after']?.firstOrNull)
+          : null,
     );
+  }
+
+  static Duration _retryAfter(String? value) {
+    final seconds = int.tryParse(value ?? '');
+    if (seconds != null && seconds >= 0) return Duration(seconds: seconds);
+    try {
+      final duration = HttpDate.parse(value ?? '')
+          .difference(DateTime.now().toUtc());
+      if (!duration.isNegative) return duration;
+    } catch (_) {}
+    return const Duration(minutes: 5);
   }
 
   static ServiceFailure? fromSavedMessage(String? message) {

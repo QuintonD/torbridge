@@ -13,6 +13,11 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
+    private val downloadIo = java.util.concurrent.Executors.newSingleThreadExecutor()
+    override fun onDestroy() {
+        downloadIo.shutdown()
+        super.onDestroy()
+    }
     private val downloadChannelName = "app.torbridge/downloads"
     private val bridgeChannelName = "app.torbridge/bridge"
 
@@ -21,6 +26,19 @@ class MainActivity : FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, downloadChannelName)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
+                    "storageSnapshot", "inspectFile" -> {
+                        downloadIo.execute {
+                            try {
+                                val audit = DownloadAudit(applicationContext)
+                                val value = if (call.method == "storageSnapshot")
+                                    audit.snapshot(call.argument<List<String>>("paths") ?: emptyList())
+                                else audit.inspect(call.argument<String>("path") ?: "", call.argument<Number>("id")?.toLong())
+                                runOnUiThread { result.success(value) }
+                            } catch (_: Exception) {
+                                runOnUiThread { result.error("audit_failed", "Storage audit could not complete. Files were not changed.", null) }
+                            }
+                        }
+                    }
                     "networkInfo" -> try {
                         val connectivity = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
                         val network = connectivity.activeNetwork
@@ -73,7 +91,7 @@ class MainActivity : FlutterActivity() {
                             safeFilename.isNullOrBlank() ->
                                 result.error("invalid_filename", "The download filename is empty after sanitizing it.", null)
                             else -> try {
-                                result.success(enqueue(url, safeFilename, headers))
+                                result.success(enqueue(url, safeFilename, headers, call.argument<String>("jobId")))
                             } catch (error: Exception) {
                                 result.error("enqueue_failed", error.message, null)
                             }
@@ -171,10 +189,13 @@ class MainActivity : FlutterActivity() {
     private fun enqueue(
         url: String,
         filename: String,
-        headers: Map<String, String>
+        headers: Map<String, String>,
+        jobId: String? = null
     ): Map<String, Any> {
         val base = getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: filesDir
-        val directory = File(base, "TorBridge/Transfers/${java.util.UUID.randomUUID()}").apply { mkdirs() }
+        val owner = jobId?.takeIf { it.matches(Regex("[A-Za-z0-9_-]{1,100}")) }
+        val relative = if (owner == null) "TorBridge/Transfers" else "TorBridge/Transfers/$owner"
+        val directory = File(base, "$relative/${java.util.UUID.randomUUID()}").apply { mkdirs() }
         val target = uniqueFile(directory, filename)
         val request = DownloadManager.Request(Uri.parse(url))
             .setTitle(filename)
@@ -193,7 +214,7 @@ class MainActivity : FlutterActivity() {
         request.setDestinationUri(Uri.fromFile(target))
         val id = manager().enqueue(request)
         val saved = getSharedPreferences(DOWNLOAD_PREFS, Context.MODE_PRIVATE)
-            .edit().putString("path_$id", target.absolutePath).commit()
+            .edit().putString("path_$id", target.absolutePath).putString("job_$id", jobId).commit()
         if (!saved) {
             manager().remove(id)
             throw java.io.IOException("Could not save the download location.")
@@ -204,7 +225,8 @@ class MainActivity : FlutterActivity() {
     private fun status(id: Long): Map<String, Any?> {
         DownloadRetention(this).retainedPath(id)?.let {
             val size = File(it).length()
-            return mapOf("state" to "complete", "downloaded" to size, "total" to size, "localPath" to it)
+            val expected = getSharedPreferences(DOWNLOAD_PREFS, Context.MODE_PRIVATE).getLong("bytes_$id", -1)
+            return mapOf("state" to "complete", "downloaded" to size, "total" to expected, "localPath" to it)
         }
         val query = DownloadManager.Query().setFilterById(id)
         manager().query(query).use { cursor ->
@@ -245,7 +267,7 @@ class MainActivity : FlutterActivity() {
 
     private fun forgetDownload(id: Long) {
         getSharedPreferences(DOWNLOAD_PREFS, Context.MODE_PRIVATE)
-            .edit().remove("path_$id").remove("retained_$id").apply()
+            .edit().remove("path_$id").remove("retained_$id").remove("bytes_$id").remove("job_$id").apply()
     }
 
     private fun deletePath(value: String): Boolean = synchronized(LocalDownloadAccess.lock) {

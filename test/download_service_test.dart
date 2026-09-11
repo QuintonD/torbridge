@@ -86,8 +86,11 @@ void main() {
       ];
       messenger.setMockMethodCallHandler(
         channel,
-        (call) async =>
-            call.method == 'status' ? states.removeAt(0) : '/movie.mp4',
+        (call) async => call.method == 'status'
+            ? states.removeAt(0)
+            : call.method == 'inspectFile'
+            ? {'bytes': 64, 'header': List<int>.filled(64, 42)}
+            : '/movie.mp4',
       );
       final service = AndroidSystemDownloadService();
       final messages = <String?>[];
@@ -161,9 +164,12 @@ void main() {
           return {
             'state': 'complete',
             'localPath': '/old/movie.mp4',
-            'total': 3,
-            'downloaded': 3,
+            'total': 64,
+            'downloaded': 64,
           };
+        }
+        if (call.method == 'inspectFile') {
+          return {'bytes': 64, 'header': List<int>.filled(64, 42)};
         }
         expect(call.method, 'resolve');
         expect(call.arguments, {'path': '/old/movie.mp4', 'id': 1986});

@@ -142,7 +142,11 @@ class SharedPreferencesLocalStateStore implements LocalStateStore {
         'Download records are protected because they could not be read.',
       );
     }
-    await storage.setString(_downloadsKey, jsonEncode(records));
+    if (!await storage.setString(_downloadsKey, jsonEncode(records))) {
+      throw StateError(
+        'Could not save download records. No new transfer should start.',
+      );
+    }
   }
 
   Map<String, dynamic> _preferencesToJson(DownloadPreferences value) => {
