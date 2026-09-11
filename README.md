@@ -42,7 +42,7 @@ and respects server rate limits. Diagnostics now inventories managed files,
 partial transfers and retention records without deleting them, and flags obvious
 error payloads and recorded-size mismatches.
 
-Install over the existing app and run **Diagnostics ? Run checks**. Review any
+Install over the existing app and run **Diagnostics → Run checks**. Review any
 suspicious, untracked or unverified results. Android can continue an active
 transfer outside TorBridge; **keep the app open to advance queued work or refresh
 failed links**. Header/size checks do not prove full video integrity.
