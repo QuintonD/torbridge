@@ -348,7 +348,11 @@ class _DownloadTile extends ConsumerWidget {
                   FilledButton.tonalIcon(
                     onPressed: () => unawaited(controller.retryDownload(job)),
                     icon: const Icon(Icons.refresh),
-                    label: const Text('Retry download'),
+                    label: Text(
+                      job.status == DownloadStatus.waitingForNetwork
+                          ? 'Resume waiting downloads'
+                          : 'Retry download',
+                    ),
                   )
                 else
                   TextButton.icon(
