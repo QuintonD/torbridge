@@ -14,11 +14,11 @@ video downloads, built-in playback, Stremio integration, and optional Trakt sync
 
 | Your device | Current build | Download |
 | --- | --- | --- |
-| **Pixel 7a, Galaxy S25, and other ARM64 phones** | Android **1.2.14**, 42.5 MB | **[Download ARM64 APK](https://github.com/QuintonD/torbridge/releases/download/v1.2.14/TorBridge-Android-1.2.14-arm64.apk)** |
-| Other supported Android architectures | Android **1.2.14**, 121.3 MB | [Download universal APK](https://github.com/QuintonD/torbridge/releases/download/v1.2.14/TorBridge-Android-1.2.14.apk) |
-| Windows x64 | Windows **1.2.14**, 34.1 MB | [Download Windows ZIP](https://github.com/QuintonD/torbridge/releases/download/v1.2.14/TorBridge-Windows-x64-1.2.14.zip) |
+| **Pixel 7a, Galaxy S25, and other ARM64 phones** | Android **1.2.15**, 42.6 MB | **[Download ARM64 APK](https://github.com/QuintonD/torbridge/releases/download/v1.2.15/TorBridge-Android-1.2.15-arm64.apk)** |
+| Other supported Android architectures | Android **1.2.15**, 121.6 MB | [Download universal APK](https://github.com/QuintonD/torbridge/releases/download/v1.2.15/TorBridge-Android-1.2.15.apk) |
+| Windows x64 | Windows **1.2.15**, 34.1 MB | [Download Windows ZIP](https://github.com/QuintonD/torbridge/releases/download/v1.2.15/TorBridge-Windows-x64-1.2.15.zip) |
 
-[Release notes](https://github.com/QuintonD/torbridge/releases/tag/v1.2.14) · [SHA-256 checksums](https://github.com/QuintonD/torbridge/releases/download/v1.2.14/SHA256SUMS.txt) · [All releases](https://github.com/QuintonD/torbridge/releases)
+[Release notes](https://github.com/QuintonD/torbridge/releases/tag/v1.2.15) · [SHA-256 checksums](https://github.com/QuintonD/torbridge/releases/download/v1.2.15/SHA256SUMS.txt) · [All releases](https://github.com/QuintonD/torbridge/releases)
 
 ### Updating an existing installation
 
@@ -34,25 +34,21 @@ See the [installation and update guide](docs/updating.md) for details. GitHub's
 **Source code** archives are for development, not installation. Android builds
 are signed for personal sideloading and are not distributed through Google Play.
 
-### What's new in 1.2.14
+### What's new in 1.2.15
 
-Episode selections are saved before source preparation, and queued jobs get
-fresh links when they start. Network recovery uses a persisted, bounded backoff
-and respects server rate limits. Diagnostics now inventories managed files,
-partial transfers and retention records without deleting them, and flags obvious
-error payloads and recorded-size mismatches.
+Copy setup directly between Android phones. Update both phones, then open
+**Settings → Transfer setup → Show setup QR** on the configured phone and
+**Scan setup QR** on the receiving phone. Keep both unlocked on the same Wi-Fi,
+compare the codes and confirm import. Connections and download preferences
+transfer securely; downloaded files and local watched history stay in place.
+Windows-to-phone setup remains available.
 
-Install over the existing app and run **Diagnostics → Run checks**. Review any
-suspicious, untracked or unverified results. Android can continue an active
-transfer outside TorBridge; **keep the app open to advance queued work or refresh
-failed links**. Header/size checks do not prove full video integrity.
-
-Validation: **114 host tests**, **ten native API 36 tests**, verified signed
-updates preserving private app data, complete Windows bundle checks, and
-re-downloaded release assets matching SHA-256/GitHub digests. Physical Pixel 7a /
-Android 17, weak Wi-Fi endurance and live multi-GB provider behavior remain
-unverified. See the [plan and review](docs/download-integrity-and-queue-plan.md)
-and [release notes](docs/releases/v1.2.14.md).
+Validation: **118 host tests**, an **Android API 36 emulator transfer test**,
+clean analysis, signed APK/ABI checks, complete Windows bundle verification,
+and re-downloaded release assets matching SHA-256/GitHub digests. Physical
+S25-to-Pixel camera scanning and Android 17 remain untested. This update does
+not change download recovery. See the [setup guide and review](docs/phone-setup-transfer.md)
+and [release notes](docs/releases/v1.2.15.md).
 
 ## A look inside
 
@@ -70,7 +66,7 @@ and [release notes](docs/releases/v1.2.14.md).
 - Keeps completed Android videos in an offline library protected from Download
   Manager's original-file cleanup.
 - Plays locally in TorBridge or hands a video to Stremio or another player.
-- Supports optional Trakt sync and encrypted desktop-to-phone setup transfer.
+- Supports optional Trakt sync and encrypted phone-to-phone or desktop-to-phone setup transfer.
 
 Explore demo mode without credentials. Live discovery and downloads use your
 AIOStreams configuration and TorBox account; Trakt is optional. Direct external
@@ -101,23 +97,27 @@ serve the file reliably without broad storage permission.
 
 Only download or play media you are authorized to access.
 
-## Transfer desktop setup to Android
+## Transfer setup to an Android phone
 
-1. Keep the Windows computer and Android device on the same local network.
-2. In TorBridge Desktop, open **Settings → Transfer setup → Show setup QR**.
-3. In TorBridge Mobile, open **Settings → Transfer setup → Scan desktop QR**.
+1. Keep both devices on the same local network, with phones unlocked on Wi-Fi.
+2. On the configured Android phone or Windows computer, open
+   **Settings → Transfer setup → Show setup QR** and keep the screen open.
+3. On the receiving phone, open **Settings → Transfer setup → Scan setup QR**.
 4. Confirm that the six-digit codes match, review the services being imported,
    and choose **Import setup**.
 
-On the first transfer, Windows Firewall may ask for network access. Allow
-TorBridge on **Private networks** only; public-network access is unnecessary.
+For a Windows sender, Windows Firewall may ask for network access. Allow
+TorBridge on **Private networks** only. Guest Wi-Fi or VPN restrictions can
+block local connections. Android export requires 1.2.15 or later.
 
 The QR contains a short-lived LAN address, one-time authorization token, and
 random encryption key—not the TorBox, AIOStreams, or Trakt credentials. The
-desktop sends an AES-256-GCM authenticated ciphertext, accepts one claim, and
+sending device sends an AES-256-GCM authenticated ciphertext, accepts one claim, and
 ends the pairing session after five minutes. Preferences and credentials are
 transferred; downloads, watched history, and local file paths stay on their
-original device.
+original device. The QR grants access to the setup: only scan it with your
+receiving phone. Import replaces that phone's connections and download rules;
+the sender is unchanged. Close and reopen the sender dialog for a fresh QR.
 
 ## What chooses the link
 
