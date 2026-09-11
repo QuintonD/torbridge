@@ -26,12 +26,14 @@ import 'package:torbridge/integrations/cinemeta_client.dart';
 import 'package:torbridge/integrations/torbox_client.dart';
 import 'package:torbridge/services/credential_store.dart';
 import 'package:torbridge/services/download_service.dart';
+import 'package:torbridge/services/file_integrity.dart';
 import 'package:torbridge/services/network_diagnostics.dart';
 import 'package:torbridge/services/local_state_store.dart';
 import 'package:torbridge/services/setup_transfer_service.dart';
 import 'package:torbridge/services/stremio_bridge_service.dart';
 
 void main() {
+  durableQueueRegressions();
   pixelNetworkRegressions();
   auditProbes();
   downloadRecoveryRegressions();
@@ -120,19 +122,19 @@ void main() {
         }
         await tester.pump(const Duration(seconds: 31));
         await retry;
-        expect(service.calls, cancel ? 1 : 2);
+        expect(service.calls, 1);
         if (cancel) {
           expect(controller.state.downloads, isEmpty);
         } else {
           expect(
             controller.state.downloads.single.status,
-            DownloadStatus.complete,
+            DownloadStatus.waitingForNetwork,
           );
         }
         // A response arriving after timeout must never start another transfer.
         addon.response.complete([]);
         await tester.pump();
-        expect(service.calls, cancel ? 1 : 2);
+        expect(service.calls, 1);
         controller.dispose();
       },
     );
@@ -161,9 +163,13 @@ void main() {
     final controller = TorBridgeController(
       service,
       _FakeBridge(),
-      _EmptyCredentials(),
+      _MemoryCredentials()
+        ..value = const StoredConnections(
+          aioManifestUrl: 'https://fixture.invalid/manifest.json',
+          torBoxToken: 'fixture',
+        ),
       CinemetaClient(),
-      AioStreamsClient(),
+      _SlowAioStreamsClient(),
       _MemoryStateStore(),
     );
     addTearDown(controller.dispose);
@@ -688,6 +694,12 @@ class _DestinationConflictService extends DownloadService {
 }
 
 class _RecordingDownloadService extends DownloadService {
+  @override
+  Future<FileInspection> inspectFile(
+    String path, {
+    String? platformId,
+    int? expectedBytes,
+  }) async => const FileInspection("unverified", "Synthetic file fixture");
   final List<String> deleted = [];
   final List<Uri> urls = [];
 
@@ -1600,8 +1612,8 @@ void auditProbes() {
           ),
       ]);
       expect(paths.toSet(), hasLength(2));
-      expect(await File(paths[0]).readAsString(), '/one');
-      expect(await File(paths[1]).readAsString(), '/two');
+      expect(await File(paths[0]).readAsString(), 'fixture-video-bytes/one');
+      expect(await File(paths[1]).readAsString(), 'fixture-video-bytes/two');
     } finally {
       PathProviderPlatform.instance = oldPaths;
       dio.close(force: true);
@@ -1671,7 +1683,10 @@ class _AuditHttpAdapter implements HttpClientAdapter {
     Future<void>? cancelFuture,
   ) async {
     await Future<void>.delayed(const Duration(milliseconds: 50));
-    return ResponseBody.fromString(options.uri.path, 200);
+    return ResponseBody.fromString(
+      'fixture-video-bytes${options.uri.path}',
+      200,
+    );
   }
 
   @override
@@ -2563,5 +2578,466 @@ class _AuditTrakt extends TraktClient {
   }) async {
     await Future<void>.delayed(const Duration(milliseconds: 2));
     changes.add('${media.imdbId}:${media.season}:${media.episode}:$watched');
+  }
+}
+
+class _AuditBatchFailure extends _BulkAioStreamsClient {
+  int prepared = 0;
+  @override
+  Future<List<StreamCandidate>> getStreams({
+    required Uri manifestUrl,
+    required String type,
+    required String videoId,
+  }) async {
+    if (type != 'series') return [_fallbackCandidate];
+    if (prepared == 1) {
+      throw DioException(
+        requestOptions: RequestOptions(path: 'https://fixture.invalid/stream'),
+        type: DioExceptionType.connectionError,
+        error: const SocketException("Failed host lookup: 'fixture.invalid'"),
+      );
+    }
+    prepared++;
+    return super.getStreams(
+      manifestUrl: manifestUrl,
+      type: type,
+      videoId: videoId,
+    );
+  }
+
+  @override
+  Future<List<StreamCandidate>> getTorrentioStreams({
+    required String type,
+    required String videoId,
+  }) async => [];
+}
+
+class _AuditStaleUrlDownloads extends _RecordingDownloadService {
+  @override
+  Future<String> download({
+    required String jobId,
+    required Uri url,
+    required String suggestedName,
+    required DownloadProgressCallback onProgress,
+    DownloadEnqueuedCallback? onEnqueued,
+    Map<String, String> requestHeaders = const {},
+  }) async {
+    urls.add(url);
+    onEnqueued?.call('fixture-native');
+    if (urls.length == 1) throw const DownloadFailureException(1009);
+    return '/fixture/completed.mp4';
+  }
+}
+
+class _SerialAuditDownloads extends _RecordingDownloadService {
+  @override
+  int get maxConcurrentDownloads => 1;
+}
+
+void durableQueueRegressions() {
+  testWidgets(
+    'overlapping rate limits cannot shorten the longer server cooldown',
+    (tester) async {
+      final now = DateTime.utc(2026);
+      final service = _OverlappingRateLimits();
+      final store = _MemoryStateStore();
+      final controller = TorBridgeController(
+        service,
+        _FakeBridge(),
+        _EmptyCredentials(),
+        CinemetaClient(),
+        AioStreamsClient(),
+        store,
+        null,
+        null,
+        null,
+        () => now,
+      );
+      await controller.initialize();
+      final first = controller.downloadCandidate(_fallbackCandidate);
+      await tester.pump();
+      controller.selectTitle(_auditTitle('second'));
+      final second = controller.downloadCandidate(_fallbackCandidate);
+      await tester.pump();
+      expect(service.responses, hasLength(2));
+      service.responses[0].completeError(
+        const ServiceFailure(
+          NetworkFailureKind.http,
+          stage: 'fixture',
+          status: 429,
+          retryAfter: Duration(minutes: 15),
+        ),
+      );
+      await first;
+      service.responses[1].completeError(const DownloadFailureException(429));
+      await second;
+      await tester.pump();
+      expect(
+        store.value.downloadRecords.every(
+          (r) =>
+              DateTime.parse(r['rateLimitUntil'] as String) ==
+              now.add(const Duration(minutes: 15)),
+        ),
+        isTrue,
+      );
+      controller.dispose();
+    },
+  );
+
+  test(
+    'source fallback preserves an integrity failure and its file path',
+    () async {
+      final service = _CorruptFallbackDownloads();
+      final torbox = _NetworkTorBox()..offline = false;
+      final controller = TorBridgeController(
+        service,
+        _FakeBridge(),
+        _MemoryCredentials()
+          ..value = const StoredConnections(torBoxToken: 'fixture'),
+        CinemetaClient(),
+        AioStreamsClient(),
+        _MemoryStateStore(),
+        (_) => torbox,
+      );
+      addTearDown(controller.dispose);
+      await controller.initialize();
+      await controller.downloadCandidate(_fallbackCandidate);
+      expect(
+        controller.state.downloads.single.status,
+        DownloadStatus.unavailable,
+      );
+      expect(
+        controller.state.downloads.single.localPath,
+        '/fixture/suspicious.mp4',
+      );
+      expect(
+        controller.state.downloads.single.error,
+        contains('Fixture malformed media'),
+      );
+    },
+  );
+
+  test('a failed queue write starts no transfer and clears busy', () async {
+    final service = _SerialAuditDownloads();
+    final store = _FailingQueueStore();
+    final controller = TorBridgeController(
+      service,
+      _FakeBridge(),
+      _EmptyCredentials(),
+      CinemetaClient(),
+      _BulkAioStreamsClient(),
+      store,
+    );
+    addTearDown(controller.dispose);
+    await controller.initialize();
+    store.fail = true;
+    await expectLater(
+      controller.downloadEpisodes(_seriesTitle, _seriesEpisodes),
+      throwsStateError,
+    );
+    expect(service.urls, isEmpty);
+    expect(controller.state.busy, isFalse);
+    expect(controller.state.downloads, hasLength(_seriesEpisodes.length));
+  });
+
+  testWidgets(
+    'automatic network recovery is bounded, persisted and cancelled on disposal',
+    (tester) async {
+      var now = DateTime.utc(2026);
+      final service = _AlwaysOfflineDownloads();
+      final store = _MemoryStateStore();
+      final controller = TorBridgeController(
+        service,
+        _FakeBridge(),
+        _MemoryCredentials()
+          ..value = const StoredConnections(
+            aioManifestUrl: 'https://fixture.invalid/manifest.json',
+            torBoxToken: 'fixture',
+          ),
+        CinemetaClient(),
+        _SlowAioStreamsClient(),
+        store,
+        null,
+        null,
+        null,
+        () => now,
+      );
+      await controller.initialize();
+      await controller.downloadCandidate(_fallbackCandidate);
+      for (var attempt = 1; attempt < 5; attempt++) {
+        expect(controller.state.downloads.single.retryCount, attempt);
+        final deadline = controller.state.downloads.single.retryAt!;
+        final delay = deadline.difference(now);
+        now = deadline;
+        await tester.pump(delay);
+        await tester.pump();
+      }
+      expect(service.calls, 5);
+      expect(store.value.downloadRecords.single['retryCount'], 5);
+      now = now.add(const Duration(days: 1));
+      await tester.pump(const Duration(days: 1));
+      expect(service.calls, 5);
+      controller.dispose();
+    },
+  );
+  testWidgets(
+    'HTTP 429 stops replacement attempts and manual retry respects persisted cooldown',
+    (tester) async {
+      var now = DateTime.utc(2026);
+      final service = _RateLimitedDownloads();
+      final store = _MemoryStateStore();
+      final controller = TorBridgeController(
+        service,
+        _FakeBridge(),
+        _EmptyCredentials(),
+        CinemetaClient(),
+        AioStreamsClient(),
+        store,
+        null,
+        null,
+        null,
+        () => now,
+      );
+      await controller.initialize();
+      await controller.downloadCandidate(_fallbackCandidate);
+      expect(service.calls, 1);
+      expect(
+        controller.state.downloads.single.status,
+        DownloadStatus.waitingForNetwork,
+      );
+      controller.resumeWaitingDownloads();
+      await tester.pump(const Duration(seconds: 1));
+      expect(service.calls, 1);
+      expect(
+        DateTime.parse(
+          store.value.downloadRecords.single['rateLimitUntil'] as String,
+        ),
+        now.add(const Duration(minutes: 5)),
+      );
+      controller.dispose();
+    },
+  );
+  for (final ambiguous in [false, true]) {
+    test('native enqueue gap reconciliation: ambiguous=$ambiguous', () async {
+      final service = _NativeGapDownloads(ambiguous);
+      final store = _MemoryStateStore()
+        ..value = StoredLocalState(downloadRecords: [_savedTransfer('gap')]);
+      final controller = TorBridgeController(
+        service,
+        _FakeBridge(),
+        _EmptyCredentials(),
+        CinemetaClient(),
+        AioStreamsClient(),
+        store,
+      );
+      addTearDown(controller.dispose);
+      await controller.initialize();
+      await Future<void>.delayed(Duration.zero);
+      expect(service.urls, isEmpty);
+      if (ambiguous) {
+        expect(controller.state.downloads.single.status, DownloadStatus.failed);
+        expect(service.restored, isEmpty);
+      } else {
+        expect(controller.state.downloads.single.platformId, '73');
+        expect(service.restored.keys, ['gap']);
+        service.restored['gap']!.complete('/fixture/retained.mp4');
+        await Future<void>.delayed(Duration.zero);
+      }
+    });
+  }
+
+  test('1000 intents survive a second-episode DNS failure without preparing later links', () async {
+    final store = _MemoryStateStore();
+    final addon = _AuditBatchFailure();
+    final service = _SerialAuditDownloads();
+    final controller = TorBridgeController(
+      service,
+      _FakeBridge(),
+      _MemoryCredentials()
+        ..value = const StoredConnections(
+          aioManifestUrl: 'https://fixture.invalid/manifest.json',
+          torBoxToken: 'fixture',
+        ),
+      CinemetaClient(),
+      addon,
+      store,
+      (_) => _FakeTorBoxClient(),
+    );
+    addTearDown(controller.dispose);
+    await controller.initialize();
+    final episodes = List.generate(
+      1000,
+      (i) => CatalogVideo(
+        id: 'fixture:1:${i + 1}',
+        title: 'Episode ${i + 1}',
+        season: 1,
+        episode: i + 1,
+      ),
+    );
+    final result = await controller.downloadEpisodes(
+      _seriesTitle.copyWith(videos: episodes),
+      episodes,
+    );
+    expect(result.queued, 1000);
+    for (
+      var i = 0;
+      i < 100 &&
+          !controller.state.downloads.any(
+            (j) => j.status == DownloadStatus.waitingForNetwork,
+          );
+      i++
+    ) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(controller.state.downloads, hasLength(1000));
+    expect(store.value.downloadRecords, hasLength(1000));
+    expect(controller.state.busy, isFalse);
+    expect(addon.prepared, 1);
+    expect(service.urls, hasLength(1));
+    expect(
+      controller.state.downloads.where(
+        (j) => j.status == DownloadStatus.waitingForNetwork,
+      ),
+      hasLength(999),
+    );
+    expect(
+      jsonEncode(store.value.downloadRecords),
+      isNot(contains('streamUrl')),
+    );
+  });
+  testWidgets('old URLs are never reused after a timed-out source refresh', (
+    tester,
+  ) async {
+    final addon = _SlowAioStreamsClient();
+    final service = _AuditStaleUrlDownloads();
+    final controller = TorBridgeController(
+      service,
+      _FakeBridge(),
+      _MemoryCredentials()
+        ..value = const StoredConnections(
+          aioManifestUrl: 'https://fixture.invalid/manifest.json',
+          torBoxToken: 'fixture',
+        ),
+      CinemetaClient(),
+      addon,
+      _MemoryStateStore(),
+      (_) => _FakeTorBoxClient(),
+    );
+    await controller.initialize();
+    await controller.downloadCandidate(_fallbackCandidate);
+    addon.slow = true;
+    await tester.pump(const Duration(hours: 4));
+    final retry = controller.retryDownload(controller.state.downloads.single);
+    await tester.pump(const Duration(seconds: 31));
+    await retry;
+    expect(service.urls, [_fallbackCandidate.streamUrl]);
+    expect(
+      controller.state.downloads.single.status,
+      DownloadStatus.waitingForNetwork,
+    );
+    controller.dispose();
+  });
+}
+
+class _AlwaysOfflineDownloads extends _SerialAuditDownloads {
+  int calls = 0;
+  @override
+  Future<String> download({
+    required String jobId,
+    required Uri url,
+    required String suggestedName,
+    required DownloadProgressCallback onProgress,
+    DownloadEnqueuedCallback? onEnqueued,
+    Map<String, String> requestHeaders = const {},
+  }) async {
+    calls++;
+    throw const ServiceFailure(
+      NetworkFailureKind.dns,
+      stage: 'fixture',
+      host: 'fixture.invalid',
+    );
+  }
+}
+
+class _RateLimitedDownloads extends _AlwaysOfflineDownloads {
+  @override
+  Future<String> download({
+    required String jobId,
+    required Uri url,
+    required String suggestedName,
+    required DownloadProgressCallback onProgress,
+    DownloadEnqueuedCallback? onEnqueued,
+    Map<String, String> requestHeaders = const {},
+  }) async {
+    calls++;
+    throw const DownloadFailureException(429);
+  }
+}
+
+class _NativeGapDownloads extends _SerialFixtureDownloads {
+  _NativeGapDownloads(this.ambiguous);
+  final bool ambiguous;
+  @override
+  Future<Map<String, dynamic>> storageSnapshot(List<String> paths) async => {
+    'native': [
+      {'id': 73, 'jobId': 'gap', 'state': 'paused'},
+      if (ambiguous) {'id': 74, 'jobId': 'gap', 'state': 'paused'},
+    ],
+  };
+}
+
+class _FailingQueueStore extends _MemoryStateStore {
+  bool fail = false;
+  @override
+  Future<void> saveDownloadRecords(List<Map<String, dynamic>> records) async {
+    if (fail) throw StateError('fixture write failed');
+    return super.saveDownloadRecords(records);
+  }
+}
+
+class _CorruptFallbackDownloads extends _NetworkRecoveryDownloads {
+  @override
+  Future<String> download({
+    required String jobId,
+    required Uri url,
+    required String suggestedName,
+    required DownloadProgressCallback onProgress,
+    DownloadEnqueuedCallback? onEnqueued,
+    Map<String, String> requestHeaders = const {},
+  }) async {
+    if (url.host == 'torbox.example') {
+      throw const DownloadIntegrityException(
+        '/fixture/suspicious.mp4',
+        FileInspection('invalid', 'Fixture malformed media; bytes preserved.'),
+      );
+    }
+    return super.download(
+      jobId: jobId,
+      url: url,
+      suggestedName: suggestedName,
+      onProgress: onProgress,
+      onEnqueued: onEnqueued,
+      requestHeaders: requestHeaders,
+    );
+  }
+}
+
+class _OverlappingRateLimits extends _RecordingDownloadService {
+  final responses = <Completer<String>>[];
+  @override
+  int get maxConcurrentDownloads => 2;
+  @override
+  Future<String> download({
+    required String jobId,
+    required Uri url,
+    required String suggestedName,
+    required DownloadProgressCallback onProgress,
+    DownloadEnqueuedCallback? onEnqueued,
+    Map<String, String> requestHeaders = const {},
+  }) {
+    final response = Completer<String>();
+    responses.add(response);
+    return response.future;
   }
 }

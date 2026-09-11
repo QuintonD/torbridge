@@ -6,6 +6,41 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:torbridge/services/network_diagnostics.dart';
 
 void main() {
+  test(
+    '429 preserves Retry-After seconds and dates without exposing payloads',
+    () {
+      final options = RequestOptions(
+        path: 'https://fixture.invalid/link?token=secret',
+      );
+      for (final header in [
+        '900',
+        HttpDate.format(DateTime.now().toUtc().add(const Duration(hours: 1))),
+        'invalid',
+      ]) {
+        final failure = ServiceFailure.from(
+          DioException(
+            requestOptions: options,
+            type: DioExceptionType.badResponse,
+            response: Response(
+              requestOptions: options,
+              statusCode: 429,
+              headers: Headers.fromMap({
+                'retry-after': [header],
+              }),
+              data: 'secret',
+            ),
+          ),
+          stage: 'fixture',
+        );
+        expect(failure.canWaitForNetwork, isTrue);
+        expect(failure.retryAfter!.inSeconds, greaterThanOrEqualTo(300));
+        expect(failure.toString(), isNot(contains('secret')));
+        if (header == '900') {
+          expect(failure.retryAfter, const Duration(seconds: 900));
+        }
+      }
+    },
+  );
   test('DNS failure identifies the actual API host without URL, token or response body', () {
     final failure = ServiceFailure.from(
       DioException(

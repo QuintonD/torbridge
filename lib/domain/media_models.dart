@@ -82,7 +82,10 @@ class StreamCandidate {
   final String? filename;
   final Map<String, String> requestHeaders;
 
-  StreamCandidate copyWith({CacheStatus? cacheStatus}) {
+  StreamCandidate copyWith({
+    CacheStatus? cacheStatus,
+    bool clearStreamUrl = false,
+  }) {
     return StreamCandidate(
       id: id,
       addonName: addonName,
@@ -96,11 +99,11 @@ class StreamCandidate {
       subtitleLanguages: subtitleLanguages,
       sizeBytes: sizeBytes,
       releaseTags: releaseTags,
-      streamUrl: streamUrl,
+      streamUrl: clearStreamUrl ? null : streamUrl,
       infoHash: infoHash,
       fileIndex: fileIndex,
       filename: filename,
-      requestHeaders: requestHeaders,
+      requestHeaders: clearStreamUrl ? const {} : requestHeaders,
     );
   }
 

@@ -4,6 +4,8 @@ import 'package:dio/dio.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 
+import 'file_integrity.dart';
+
 typedef DownloadProgressCallback = void Function(int received, int total);
 typedef DownloadEnqueuedCallback = void Function(String platformId);
 
@@ -20,7 +22,6 @@ class DownloadFailureException implements Exception {
       reason == 404 ||
       reason == 408 ||
       reason == 410 ||
-      reason == 429 ||
       reason >= 500 && reason <= 599 ||
       reason == 1002 ||
       reason == 1004 ||
@@ -67,6 +68,27 @@ abstract class DownloadService {
   Future<int?> availableBytes() async => null;
 
   Future<void> checkAvailableSpace(int? expectedBytes) async {}
+
+  Future<Map<String, dynamic>> storageSnapshot(List<String> paths) async =>
+      const {'roots': <String>[]};
+  Future<FileInspection> inspectFile(
+    String path, {
+    String? platformId,
+    int? expectedBytes,
+  }) => inspectMediaFile(path, expectedBytes: expectedBytes);
+  Future<FileInspection> validateCompleted(
+    String path, {
+    String? platformId,
+    int? expectedBytes,
+  }) async {
+    final inspection = await inspectFile(
+      path,
+      platformId: platformId,
+      expectedBytes: expectedBytes,
+    );
+    if (inspection.invalid) throw DownloadIntegrityException(path, inspection);
+    return inspection;
+  }
 
   /// Returns a readable local source, or null if the saved file is unavailable.
   /// Android also moves completed app-private files out of DownloadManager's
@@ -123,10 +145,52 @@ abstract class DownloadService {
 class AndroidSystemDownloadService extends DownloadService {
   static const _channel = MethodChannel('app.torbridge/downloads');
   final Map<String, String> _retentionWarnings = {};
+  final Map<String, String> _integrityWarnings = {};
   final Map<String, String> _downloadStatuses = {};
 
   @override
   int get maxConcurrentDownloads => 1;
+
+  @override
+  Future<Map<String, dynamic>> storageSnapshot(List<String> paths) async =>
+      await _channel.invokeMapMethod<String, dynamic>('storageSnapshot', {
+        'paths': paths,
+      }) ??
+      const {};
+
+  @override
+  Future<FileInspection> inspectFile(
+    String path, {
+    String? platformId,
+    int? expectedBytes,
+  }) async {
+    final probe = await _channel.invokeMapMethod<String, dynamic>(
+      'inspectFile',
+      {'path': path, 'id': int.tryParse(platformId ?? '')},
+    );
+    if (probe == null || probe['changed'] == true) {
+      return const FileInspection(
+        'unverified',
+        'File check was unavailable or the file changed during inspection.',
+      );
+    }
+    if (probe['missing'] == true) {
+      return const FileInspection('missing', 'File is missing or unreadable.');
+    }
+    final bytes = (probe['bytes'] as num?)?.toInt() ?? -1;
+    if (bytes < 0) {
+      return const FileInspection(
+        'unverified',
+        'Content length is unavailable; integrity is unverified.',
+      );
+    }
+    final expected = expectedBytes ?? (probe['expected'] as num?)?.toInt();
+    return inspectMediaHeader(
+      (probe['header'] as List? ?? []).cast<int>(),
+      bytes,
+      expectedBytes: expected != null && expected > 0 ? expected : null,
+    );
+  }
 
   @override
   Future<int?> availableBytes() => _channel.invokeMethod<int>('availableBytes');
@@ -153,7 +217,8 @@ class AndroidSystemDownloadService extends DownloadService {
   String? downloadStatus(String jobId) => _downloadStatuses[jobId];
 
   @override
-  String? localFileWarning(String path) => _retentionWarnings[path];
+  String? localFileWarning(String path) =>
+      _retentionWarnings[path] ?? _integrityWarnings[path];
 
   @override
   Future<String?> resolveLocalPath({
@@ -191,6 +256,7 @@ class AndroidSystemDownloadService extends DownloadService {
     Map<String, String> requestHeaders = const {},
   }) async {
     final result = await _channel.invokeMapMethod<String, dynamic>('enqueue', {
+      'jobId': jobId,
       'url': url.toString(),
       'filename': suggestedName,
       'headers': requestHeaders,
@@ -264,6 +330,12 @@ class AndroidSystemDownloadService extends DownloadService {
               'Android finished the transfer, but the video file is unavailable. Retry the download.',
             );
           }
+          final inspection = await validateCompleted(
+            localPath,
+            platformId: '$id',
+            expectedBytes: total > 0 ? total : null,
+          );
+          _integrityWarnings[localPath] = inspection.detail;
           return localPath;
         case 'failed':
           final reason = (status['reason'] as num?)?.toInt() ?? 1000;
@@ -315,6 +387,15 @@ class DioDownloadService extends DownloadService {
 
   final Dio _dio;
   final Map<String, CancelToken> _cancelTokens = {};
+  final Map<String, String> _warnings = {};
+  @override
+  String? localFileWarning(String path) => _warnings[path];
+  @override
+  int get maxConcurrentDownloads => 2;
+  @override
+  Future<Map<String, dynamic>> storageSnapshot(List<String> paths) async => {
+    'roots': [(await _downloadsDirectory()).path],
+  };
 
   @override
   Future<String> download({
@@ -335,7 +416,7 @@ class DioDownloadService extends DownloadService {
     _cancelTokens[jobId] = cancelToken;
     onEnqueued?.call(jobId);
     try {
-      await _dio.downloadUri(
+      final response = await _dio.downloadUri(
         url,
         path,
         onReceiveProgress: onProgress,
@@ -343,6 +424,11 @@ class DioDownloadService extends DownloadService {
         deleteOnError: true,
         options: Options(headers: requestHeaders),
       );
+      final total = int.tryParse(
+        response.headers.value(HttpHeaders.contentLengthHeader) ?? '',
+      );
+      final inspection = await validateCompleted(path, expectedBytes: total);
+      _warnings[path] = inspection.detail;
       return path;
     } finally {
       _cancelTokens.remove(jobId);

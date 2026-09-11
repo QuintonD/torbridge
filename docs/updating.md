@@ -32,6 +32,14 @@ those checks pass, choose **Downloads → Resume waiting downloads**. The app
 does not change your DNS or VPN settings. See the
 [network investigation](pixel-network-diagnosis.md) for comparison steps.
 
+From 1.2.14, episode selections are saved before source preparation. Network
+recovery backs off automatically while the app is open, with a five-attempt
+limit; server rate limits impose a cooldown. Sources are refreshed when queued
+jobs start. The read-only file audit reports remnants and suspicious files
+without deleting them. Header/size checks cannot prove full video integrity.
+Review the [file and queue investigation](download-integrity-and-queue-plan.md)
+when interpreting unverified or incomplete results.
+
 If Android refuses an update, note its exact message and your currently installed
 version. Do not uninstall as a first troubleshooting step. Report the details in
 [a bug report](https://github.com/QuintonD/torbridge/issues/new?template=bug_report.yml).

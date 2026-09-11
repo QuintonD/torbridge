@@ -56,7 +56,19 @@ class DownloadRetention(private val context: Context) {
 
     fun remember(id: Long?, path: String) {
         if (id == null) return
-        preferences.edit().putString("path_$id", path).putString("retained_$id", path).commit()
+        val editor = preferences.edit().putString("path_$id", path).putString("retained_$id", path)
+        if (!preferences.contains("bytes_$id")) {
+            val manager = context.getSystemService(Context.DOWNLOAD_SERVICE) as android.app.DownloadManager
+            manager.query(android.app.DownloadManager.Query().setFilterById(id)).use { cursor ->
+                if (cursor.moveToFirst() && cursor.getInt(cursor.getColumnIndexOrThrow(android.app.DownloadManager.COLUMN_STATUS)) == android.app.DownloadManager.STATUS_SUCCESSFUL) {
+                    val total = cursor.getLong(cursor.getColumnIndexOrThrow(android.app.DownloadManager.COLUMN_TOTAL_SIZE_BYTES))
+                    editor.putLong("bytes_$id", if (total > 0) total else File(path).length())
+                }
+            }
+        }
+        // The source-to-target journal is already durable. Missing optional size
+        // evidence is reported as unverified; never undo or misreport the move.
+        editor.commit()
     }
 
     private fun sourceKey(path: String): String = "retained_source_" +

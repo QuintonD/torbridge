@@ -18,6 +18,7 @@ import '../integrations/torbox_client.dart';
 import '../integrations/trakt_client.dart';
 import '../services/credential_store.dart';
 import '../services/download_service.dart';
+import '../services/file_integrity.dart';
 import '../services/network_diagnostics.dart';
 import '../services/local_state_store.dart';
 import '../services/setup_transfer_service.dart';
@@ -81,6 +82,12 @@ class DownloadJob {
     this.createdAt,
     this.completedAt,
     this.watchedAt,
+    this.receivedBytes = 0,
+    this.totalBytes,
+    this.completedBytes,
+    this.retryCount = 0,
+    this.retryAt,
+    this.lastProgressAt,
   });
 
   final String id;
@@ -96,6 +103,11 @@ class DownloadJob {
   final DateTime? createdAt;
   final DateTime? completedAt;
   final DateTime? watchedAt;
+  final int receivedBytes;
+  final int? totalBytes, completedBytes;
+  final int retryCount;
+  final DateTime? retryAt;
+  final DateTime? lastProgressAt;
 
   bool get needsAttention =>
       status == DownloadStatus.failed ||
@@ -130,6 +142,12 @@ class DownloadJob {
     Object? error = _unchanged,
     Object? completedAt = _unchanged,
     Object? watchedAt = _unchanged,
+    int? receivedBytes,
+    int? totalBytes,
+    int? completedBytes,
+    int? retryCount,
+    DateTime? retryAt,
+    DateTime? lastProgressAt,
   }) {
     return DownloadJob(
       id: id,
@@ -146,6 +164,12 @@ class DownloadJob {
           ? this.platformId
           : platformId as String?,
       error: identical(error, _unchanged) ? this.error : error as String?,
+      receivedBytes: receivedBytes ?? this.receivedBytes,
+      totalBytes: totalBytes ?? this.totalBytes,
+      completedBytes: completedBytes ?? this.completedBytes,
+      retryCount: retryCount ?? this.retryCount,
+      retryAt: retryAt ?? this.retryAt,
+      lastProgressAt: lastProgressAt ?? this.lastProgressAt,
       createdAt: createdAt,
       completedAt: identical(completedAt, _unchanged)
           ? this.completedAt
@@ -338,7 +362,9 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     TraktClient Function(String clientId, String clientSecret)?
     traktClientFactory,
     NetworkDiagnostics? networkDiagnostics,
+    DateTime Function()? recoveryClock,
   ]) : _torBoxClientFactory = torBoxClientFactory ?? TorBoxClient.new,
+       _recoveryClock = recoveryClock ?? DateTime.now,
        _networkDiagnostics = networkDiagnostics ?? NetworkDiagnostics(),
        _traktClientFactory =
            traktClientFactory ??
@@ -346,6 +372,7 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
        super(const TorBridgeState());
 
   final DownloadService _downloadService;
+  final DateTime Function() _recoveryClock;
   final NetworkDiagnostics _networkDiagnostics;
   final StremioBridgeService _stremioBridge;
   final CredentialStore _credentialStore;
@@ -357,6 +384,8 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
   final Map<String, Future<void>> _pendingEnqueues = {};
   final Uuid _uuid = const Uuid();
   Timer? _maintenanceTimer;
+  Timer? _networkRetryTimer;
+  DateTime? _rateLimitUntil;
   Future<void> _downloadSaveTail = Future<void>.value();
   Future<void> _torBoxProvisionTail = Future<void>.value();
   final Set<String> _retryingDownloadIds = {};
@@ -457,7 +486,9 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
       );
     }
     // Recovery needs the saved credentials, not the initial empty connection state.
+    await _reconcileNativeDownloads();
     _resumeInterruptedDownloads();
+    _scheduleNetworkRetry();
     _maintenanceTimer = Timer.periodic(const Duration(minutes: 30), (_) {
       if (state.connections.hasTraktSession) {
         unawaited(syncTraktWatched(silent: true));
@@ -470,6 +501,7 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
   @override
   void dispose() {
     _maintenanceTimer?.cancel();
+    _networkRetryTimer?.cancel();
     for (final entry in _downloadQueue.values) {
       entry.$2.complete();
     }
@@ -556,7 +588,9 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
       state = state.copyWith(
         busy: false,
         catalogTitles: results,
-        notice: results.isEmpty ? 'No titles matched “${query.trim()}”.' : null,
+        notice: results.isEmpty
+            ? 'No titles matched “${query.trim()}â€.'
+            : null,
         clearNotice: results.isNotEmpty,
       );
       if (results.isNotEmpty) selectTitle(results.first);
@@ -837,7 +871,8 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
       (item) =>
           item.videoId == videoId &&
           item.source.id == source.id &&
-          !item.needsAttention,
+          (!item.needsAttention ||
+              item.status == DownloadStatus.waitingForNetwork),
     );
     if (existing.isNotEmpty) {
       navigate(1);
@@ -899,42 +934,55 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     }
 
     var alreadyAdded = 0;
-    var noEligibleSource = 0;
     final jobs = <DownloadJob>[];
     state = state.copyWith(
       busy: true,
-      notice: 'Finding the best sources for ${requested.length} episodes…',
+      notice: 'Saving ${requested.length} episodes to the download queue…',
     );
     for (final video in requested) {
       final exists = state.downloads.any(
-        (job) => job.videoId == video.id && !job.needsAttention,
+        (job) =>
+            job.videoId == video.id &&
+            (job.status == DownloadStatus.waitingForNetwork ||
+                !job.needsAttention),
       );
       if (exists) {
         alreadyAdded++;
         continue;
       }
-      final candidates = await _fetchSources(title, video);
-      final best = const RecommendationEngine()
-          .rank(candidates, state.preferences)
-          .best;
-      if (best == null) {
-        noEligibleSource++;
-        continue;
-      }
-      jobs.add(_newDownloadJob(title, video, best.candidate));
+      jobs.add(
+        _newDownloadJob(
+          title,
+          video,
+          StreamCandidate(
+            id: 'pending:${video.id}',
+            addonName: 'Queued',
+            displayName: 'Waiting for source preparation',
+            description: '',
+            resolution: null,
+            codec: VideoCodec.unknown,
+            hdr: HdrFormat.unknown,
+            cacheStatus: CacheStatus.unknown,
+            audioLanguages: const {},
+            subtitleLanguages: const {},
+            sizeBytes: null,
+            releaseTags: const {},
+          ),
+        ),
+      );
     }
 
     if (!mounted) {
       return BulkDownloadResult(
         queued: jobs.length,
         alreadyAdded: alreadyAdded,
-        noEligibleSource: noEligibleSource,
+        noEligibleSource: 0,
       );
     }
     final result = BulkDownloadResult(
       queued: jobs.length,
       alreadyAdded: alreadyAdded,
-      noEligibleSource: noEligibleSource,
+      noEligibleSource: 0,
     );
     state = state.copyWith(
       downloads: [...jobs.reversed, ...state.downloads],
@@ -942,7 +990,15 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
       notice: result.message,
     );
     if (jobs.isNotEmpty) {
-      await _saveDownloads();
+      try {
+        await _saveDownloads();
+      } catch (_) {
+        state = state.copyWith(
+          busy: false,
+          notice: 'Could not save the queue. No new transfer was started.',
+        );
+        rethrow;
+      }
       for (final job in jobs) {
         unawaited(_runDownload(job, refreshSource: true));
       }
@@ -979,13 +1035,16 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     if (current == null || current.status != DownloadStatus.queued) {
       return Future<void>.value();
     }
-    if (state.downloads.any(
-      (job) => job.status == DownloadStatus.waitingForNetwork,
-    )) {
+    final waiting = state.downloads
+        .where((job) => job.status == DownloadStatus.waitingForNetwork)
+        .firstOrNull;
+    if (waiting != null) {
       _replaceJob(
         current.copyWith(
           status: DownloadStatus.waitingForNetwork,
-          error: 'Queue paused after a network failure. Run Diagnostics, then resume waiting downloads.',
+          error: waiting.error,
+          retryCount: waiting.retryCount,
+          retryAt: waiting.retryAt,
         ),
       );
       return Future<void>.value();
@@ -1005,6 +1064,7 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
         original.copyWith(
           error: 'Queued — waiting for the current download. Reopen TorBridge if Android closes it.',
         ),
+        persist: false,
       );
     }
     _pumpDownloadQueue();
@@ -1062,7 +1122,17 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     _replaceJob(job);
     try {
       if (refreshSource) {
-        job = job.copyWith(source: await _refreshSource(job) ?? job.source);
+        final refreshed = await _refreshSource(job);
+        if (refreshed == null && job.source.infoHash == null) {
+          throw StateError(
+            'No fresh eligible source is available. Retry source preparation.',
+          );
+        }
+        // A failed refresh must never revive an old signed URL. Stable torrent
+        // identity can still prepare a new direct TorBox link below.
+        job = job.copyWith(
+          source: refreshed ?? job.source.copyWith(clearStreamUrl: true),
+        );
         _replaceJob(job);
       }
       String localPath;
@@ -1091,6 +1161,7 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
           status: DownloadStatus.complete,
           progress: 1,
           localPath: localPath,
+          completedBytes: job.totalBytes,
           completedAt: DateTime.now().toUtc(),
           error: _downloadService.localFileWarning(localPath),
         ),
@@ -1098,7 +1169,25 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
       await _ensureBridge();
       await removeExpiredWatchedDownloads();
     } catch (error) {
-      final failure = ServiceFailure.from(error, stage: 'download');
+      if (error is DownloadIntegrityException) {
+        _replaceJob(
+          job.copyWith(
+            status: DownloadStatus.unavailable,
+            localPath: error.path,
+            error: error.toString(),
+          ),
+        );
+        return;
+      }
+      final failure = error is DownloadFailureException && error.reason == 429
+          ? ServiceFailure(
+              NetworkFailureKind.http,
+              stage: 'download',
+              host: error.host,
+              status: 429,
+              retryAfter: const Duration(minutes: 5),
+            )
+          : ServiceFailure.from(error, stage: 'download');
       if (failure.canWaitForNetwork) {
         _parkForNetwork(job, failure);
         return;
@@ -1148,7 +1237,7 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
         !state.downloads.any((item) => item.id == job.id)) {
       throw StateError('Download cancelled.');
     }
-    var current = job;
+    var current = job.copyWith(receivedBytes: 0, totalBytes: 0);
     // Do not retire a failed native job until its replacement URL and storage
     // are ready. Network preparation failures must keep its ID and file.
     if (current.platformId != null) {
@@ -1193,6 +1282,11 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
           final progress = total > 0 ? received / total : 0.0;
           current = current.copyWith(
             progress: progress.clamp(0, 1),
+            receivedBytes: received,
+            totalBytes: total > 0 ? total : 0,
+            lastProgressAt: received > current.receivedBytes
+                ? DateTime.now().toUtc()
+                : null,
             error: _downloadService.downloadStatus(job.id),
           );
           onJobChanged(current);
@@ -1238,6 +1332,8 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
         if (!error.isRetryableSourceFailure) rethrow;
         latestError = error;
       } on DownloadStorageException {
+        rethrow;
+      } on DownloadIntegrityException {
         rethrow;
       } catch (error) {
         throw ServiceFailure.from(error, stage: 'refreshed source download');
@@ -1298,6 +1394,8 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
       rethrow;
     } on DownloadStorageException {
       rethrow;
+    } on DownloadIntegrityException {
+      rethrow;
     } catch (fallbackError) {
       throw ServiceFailure.from(fallbackError, stage: 'TorBox recovery');
     }
@@ -1314,20 +1412,50 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
         !state.downloads.any((item) => item.id == job.id)) {
       return;
     }
+    final attempts =
+        state.downloads.fold<int>(
+          job.retryCount,
+          (n, item) =>
+              item.status == DownloadStatus.waitingForNetwork &&
+                  item.retryCount > n
+              ? item.retryCount
+              : n,
+        ) +
+        1;
+    final now = _recoveryClock().toUtc();
+    final delay = Duration(
+      seconds: (30 * (1 << attempts.clamp(0, 4))) + now.millisecond % 15,
+    );
+    final deadline = now.add(
+      failure.retryAfter != null && failure.retryAfter! > delay
+          ? failure.retryAfter!
+          : delay,
+    );
+    if (failure.status == 429 &&
+        (_rateLimitUntil == null || deadline.isAfter(_rateLimitUntil!))) {
+      _rateLimitUntil = deadline;
+    }
     _replaceJob(
       job.copyWith(
         status: DownloadStatus.waitingForNetwork,
         error: failure.toString(),
+        retryCount: attempts,
+        retryAt: deadline,
       ),
     );
     state = state.copyWith(
       notice: 'Downloads are paused after a network failure. Run Diagnostics, then resume waiting downloads.',
       downloads: [
         for (final item in state.downloads)
-          if (item.status == DownloadStatus.queued)
+          if (item.status == DownloadStatus.queued ||
+              item.status == DownloadStatus.waitingForNetwork)
             item.copyWith(
               status: DownloadStatus.waitingForNetwork,
-              error: 'Waiting for the network. No replacement download has started.',
+              error: attempts >= 5
+                  ? '${failure.toString()} Automatic recovery paused after repeated failures. Run Diagnostics, then resume manually.'
+                  : '${failure.toString()} Waiting for recovery. Automatic retry after ${deadline.toLocal()}; keep TorBridge open.',
+              retryCount: attempts,
+              retryAt: deadline,
             )
           else
             item,
@@ -1338,9 +1466,40 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     }
     _downloadQueue.clear();
     unawaited(_saveDownloads());
+    _scheduleNetworkRetry();
   }
 
-  void resumeWaitingDownloads() {
+  void _scheduleNetworkRetry() {
+    _networkRetryTimer?.cancel();
+    final waiting = state.downloads
+        .where((j) => j.status == DownloadStatus.waitingForNetwork)
+        .toList();
+    if (waiting.isEmpty ||
+        waiting.any((j) => j.retryCount >= 5 || j.retryAt == null)) {
+      return;
+    }
+    var next = waiting
+        .map((j) => j.retryAt!)
+        .reduce((a, b) => a.isAfter(b) ? a : b);
+    if (_rateLimitUntil != null && _rateLimitUntil!.isAfter(next)) {
+      next = _rateLimitUntil!;
+    }
+    final delay = next.difference(_recoveryClock().toUtc());
+    _networkRetryTimer = Timer(delay.isNegative ? Duration.zero : delay, () {
+      if (mounted) resumeWaitingDownloads(automatic: true);
+    });
+  }
+
+  void resumeWaitingDownloads({bool automatic = false}) {
+    if (_rateLimitUntil?.isAfter(_recoveryClock().toUtc()) == true) {
+      state = state.copyWith(
+        notice:
+            'The service requested a cooldown until ${_rateLimitUntil!.toLocal()}.',
+      );
+      _scheduleNetworkRetry();
+      return;
+    }
+    _networkRetryTimer?.cancel();
     final waiting = state.downloads
         .where((job) => job.status == DownloadStatus.waitingForNetwork)
         .toList();
@@ -1351,7 +1510,11 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
       downloads: [
         for (final job in state.downloads)
           if (ids.contains(job.id))
-            job.copyWith(status: DownloadStatus.queued, error: null)
+            job.copyWith(
+              status: DownloadStatus.queued,
+              error: null,
+              retryCount: automatic ? job.retryCount : 0,
+            )
           else
             job,
       ],
@@ -1391,7 +1554,7 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
       // A cancellation while sources were being refreshed must stay cancelled.
       if (latest == null || latest.status != DownloadStatus.queued) return;
       final replacement = latest.copyWith(
-        source: refreshed ?? latest.source,
+        source: refreshed ?? latest.source.copyWith(clearStreamUrl: true),
         progress: 0,
         localPath: null,
         completedAt: null,
@@ -1505,7 +1668,7 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     state = state.copyWith(
       stremioAvailable: opened,
       notice: opened
-          ? 'Stremio opened. Confirm installation of “TorBridge Offline”.'
+          ? 'Stremio opened. Confirm installation of “TorBridge Offlineâ€.'
           : 'Could not open Stremio. The addon URL was copied for manual installation.',
     );
   }
@@ -1650,6 +1813,14 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     } catch (_) {
       // A platform/storage failure must not discard the original record.
     }
+    FileInspection? inspection;
+    if (path != null) {
+      inspection = await _downloadService.inspectFile(
+        path,
+        platformId: job.platformId,
+        expectedBytes: job.completedBytes,
+      );
+    }
     if (!mounted) return null;
     // Do not overwrite a retry, deletion, or watched update while checking I/O.
     final current = state.downloads
@@ -1658,11 +1829,13 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     if (!identical(current, job)) return null;
     const unavailableMessage =
         'The video file is missing or cannot be read. Retry the download while online.';
-    final status = path == null
+    final status = path == null || inspection?.invalid == true
         ? DownloadStatus.unavailable
         : DownloadStatus.complete;
     final error = path == null
         ? unavailableMessage
+        : inspection?.invalid == true
+        ? inspection!.detail
         : _downloadService.localFileWarning(path);
     if (job.status != status ||
         (path != null && path != job.localPath) ||
@@ -1680,7 +1853,7 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     if (path == null && showNotice && mounted) {
       state = state.copyWith(notice: unavailableMessage);
     }
-    return path;
+    return inspection?.invalid == true ? null : path;
   }
 
   Future<void> runDiagnostics() async {
@@ -1693,15 +1866,105 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     }
   }
 
+  Future<Map<String, DiagnosticCheck>> _auditStorageChecks() async {
+    final checks = <String, DiagnosticCheck>{};
+    try {
+      final jobs = List<DownloadJob>.of(state.downloads);
+      final activeJobs = jobs
+          .where((j) => j.status == DownloadStatus.downloading)
+          .toList();
+      checks['Transfer progress'] = DiagnosticCheck(
+        activeJobs.isEmpty
+            ? 'No active transfers in the saved queue.'
+            : activeJobs
+                  .take(5)
+                  .map(
+                    (j) =>
+                        '${j.title}: ${j.receivedBytes} bytes received; ${j.totalBytes == null || j.totalBytes! <= 0 ? 'total unknown' : '${j.totalBytes} total bytes'}. '
+                        '${j.lastProgressAt == null ? 'No byte progress recorded yet.' : 'Last byte progress: ${j.lastProgressAt!.toLocal()}.'} ${j.error ?? ''}',
+                  )
+                  .join('\n'),
+        DiagnosticSeverity.info,
+      );
+      final snapshot = await _downloadService.storageSnapshot([
+        for (final job in jobs)
+          if (job.localPath != null) job.localPath!,
+      ]);
+      List<Map<String, dynamic>> rows(String key) => [
+        for (final row in snapshot[key] as List? ?? const [])
+          Map<String, dynamic>.from(row as Map),
+      ];
+      final audit = await auditManagedStorage(
+        roots: (snapshot['roots'] as List? ?? const []).cast<String>(),
+        references: [
+          for (final job in jobs)
+            StorageAuditReference(
+              id: job.id,
+              status: job.status.name,
+              path: job.localPath,
+              platformId: job.platformId,
+              expectedBytes: job.completedBytes,
+            ),
+        ],
+        native: rows('native'),
+        journal: rows('journal'),
+      );
+      checks['Read-only file audit'] = DiagnosticCheck(
+        '${audit.partial || snapshot['partial'] == true ? 'Partial scan; run again. ' : ''}'
+        'Files and records were preserved. Header and recorded-size checks cannot prove full decoding integrity. '
+        '${audit.counts.isEmpty ? 'No managed files found in the scanned locations.' : audit.counts.entries.map((e) => '${e.key}: ${e.value} (${((audit.bytes[e.key] ?? 0) / 1e9).toStringAsFixed(2)} GB)').join('\n')}',
+        audit.partial ||
+                snapshot['partial'] == true ||
+                audit.counts.keys.any(
+                  (k) =>
+                      k.contains('Suspicious') ||
+                      k.contains('Missing') ||
+                      k.contains('Untracked') ||
+                      k.contains('Stale'),
+                )
+            ? DiagnosticSeverity.warning
+            : DiagnosticSeverity.info,
+      );
+      checks['Saved record integrity'] = DiagnosticCheck(
+        !_downloadsReadable || _unreadDownloadRecords.isNotEmpty
+            ? '${_unreadDownloadRecords.length} unreadable records; original data remains protected.'
+            : '${jobs.length} records parsed. File integrity is checked separately.',
+        !_downloadsReadable || _unreadDownloadRecords.isNotEmpty
+            ? DiagnosticSeverity.warning
+            : DiagnosticSeverity.info,
+      );
+      final duplicateIds = jobs.length - jobs.map((j) => j.id).toSet().length;
+      if (duplicateIds > 0) {
+        checks['Duplicate job identities'] = DiagnosticCheck(
+          '$duplicateIds duplicate saved job identities require review. Original records were preserved.',
+          DiagnosticSeverity.warning,
+        );
+      }
+      checks['Queue recovery'] = const DiagnosticCheck(
+        'Android keeps active transfers through app closure and retries interruptions when the server supports resuming. Open TorBridge to advance queued jobs or refresh failed links. Fresh links are requested when each queued job starts; failed transfers may need to restart from zero.',
+        DiagnosticSeverity.info,
+      );
+    } catch (_) {
+      checks['Read-only file audit'] = const DiagnosticCheck(
+        'The audit could not finish. Files and records were preserved; integrity is unverified.',
+        DiagnosticSeverity.warning,
+      );
+    }
+    return checks;
+  }
+
   Future<void> _runDiagnostics() async {
     final checks = <String, DiagnosticCheck>{};
     final networkChecks = _checkNetworkServices();
-    await checkDownloadedFiles();
+    checks.addAll(await _auditStorageChecks());
     try {
       final available = await _downloadService.availableBytes();
       if (available != null) {
         final queued = state.downloads.where(
-          (job) => job.status == DownloadStatus.queued,
+          (job) =>
+              job.status == DownloadStatus.queued ||
+              job.status == DownloadStatus.waitingForNetwork ||
+              job.status == DownloadStatus.downloading,
         );
         final estimated = queued.fold<int>(
           0,
@@ -1710,7 +1973,7 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
         checks['Download storage'] = DiagnosticCheck(
           '${(available / 1e9).toStringAsFixed(1)} GB available in download storage; '
           '${(estimated / 1e9).toStringAsFixed(1)} GB estimated for ${queued.length} queued files. '
-          'Sizes can be unknown or approximate. Space is checked again before each transfer.',
+          '${queued.where((job) => job.source.sizeBytes == null).length} sizes are unknown; estimates can be approximate. Space is checked again before each transfer.',
           estimated > available
               ? DiagnosticSeverity.warning
               : DiagnosticSeverity.info,
@@ -1747,17 +2010,19 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
         .length;
     checks['Downloaded files'] = DiagnosticCheck(
       missing == 0
-          ? '${complete.length} readable files available'
+          ? '${complete.length} completed records. See the read-only file audit for current integrity findings.'
           : '$missing of ${complete.length} files are unavailable. Open Downloads to retry. Saved records do not contain the video files.',
       missing > 0
           ? DiagnosticSeverity.error
           : complete.isEmpty
           ? DiagnosticSeverity.info
-          : DiagnosticSeverity.success,
+          : DiagnosticSeverity.info,
     );
     final protectionFailures = complete
         .where(
-          (job) => job.status == DownloadStatus.complete && job.error != null,
+          (job) =>
+              job.status == DownloadStatus.complete &&
+              (job.error?.contains('cleanup') ?? false),
         )
         .length;
     checks['Offline storage protection'] = DiagnosticCheck(
@@ -1961,10 +2226,10 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
   Future<List<StreamCandidate>> _fetchSourcesForJob(DownloadJob job) async {
     // A slow addon must not indefinitely block retrying a saved source or
     // requesting a fresh TorBox link. Late results cannot start a transfer.
-    return _fetchSources(job.mediaTitle, job.mediaVideo).timeout(
-      const Duration(seconds: 30),
-      onTimeout: () => const <StreamCandidate>[],
-    );
+    return _fetchSources(
+      job.mediaTitle,
+      job.mediaVideo,
+    ).timeout(const Duration(seconds: 30));
   }
 
   Future<List<StreamCandidate>> _fetchSources(
@@ -2291,6 +2556,73 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     ];
   }
 
+  Future<void> _reconcileNativeDownloads() async {
+    if (!_downloadService.supportsResume) return;
+    try {
+      final snapshot = await _downloadService.storageSnapshot(const []);
+      final native = [
+        for (final row in snapshot['native'] as List? ?? const [])
+          Map<String, dynamic>.from(row as Map),
+      ];
+      var ambiguous = snapshot['partial'] == true;
+      for (final job in List<DownloadJob>.of(state.downloads)) {
+        if (job.platformId != null ||
+            job.status != DownloadStatus.queued &&
+                job.status != DownloadStatus.downloading) {
+          continue;
+        }
+        final matches = native.where((r) => r['jobId'] == job.id).toList();
+        if (matches.length == 1) {
+          _replaceJob(
+            job.copyWith(
+              platformId: '${matches.single['id']}',
+              status: DownloadStatus.downloading,
+            ),
+            persist: false,
+          );
+        } else if (matches.length > 1) {
+          ambiguous = true;
+        }
+      }
+      final known = state.downloads.map((j) => j.platformId).toSet();
+      if (native.any(
+        (r) =>
+            ['queued', 'paused', 'downloading'].contains(r['state']) &&
+            !known.contains('${r['id']}'),
+      )) {
+        ambiguous = true;
+      }
+      if (ambiguous) {
+        for (final job in List<DownloadJob>.of(state.downloads)) {
+          if (job.platformId == null &&
+              (job.status == DownloadStatus.queued ||
+                  job.status == DownloadStatus.downloading)) {
+            _replaceJob(
+              job.copyWith(
+                status: DownloadStatus.failed,
+                error: 'Native transfer ownership is uncertain. Files were preserved. Run Diagnostics before retrying.',
+              ),
+              persist: false,
+            );
+          }
+        }
+      }
+      await _saveDownloads();
+    } catch (_) {
+      for (final job in List<DownloadJob>.of(state.downloads)) {
+        if (job.platformId == null && job.status == DownloadStatus.queued) {
+          _replaceJob(
+            job.copyWith(
+              status: DownloadStatus.failed,
+              error: 'Could not reconcile native transfers safely. Run Diagnostics before retrying.',
+            ),
+            persist: false,
+          );
+        }
+      }
+    }
+  }
+
   void _resumeInterruptedDownloads() {
     final pending =
         state.downloads
@@ -2347,6 +2679,11 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
           onProgress: (received, total) {
             job = job.copyWith(
               progress: total > 0 ? (received / total).clamp(0, 1) : 0,
+              receivedBytes: received,
+              totalBytes: total > 0 ? total : 0,
+              lastProgressAt: received > job.receivedBytes
+                  ? DateTime.now().toUtc()
+                  : job.lastProgressAt,
               error: _downloadService.downloadStatus(job.id),
             );
             _replaceJob(job, persist: false);
@@ -2394,11 +2731,35 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
           progress: 1,
           localPath: path,
           completedAt: DateTime.now().toUtc(),
+          completedBytes: job.totalBytes,
           error: _downloadService.localFileWarning(path),
         ),
       );
       await _ensureBridge();
     } catch (error) {
+      if (error is DownloadIntegrityException) {
+        _replaceJob(
+          job.copyWith(
+            status: DownloadStatus.unavailable,
+            localPath: error.path,
+            error: error.toString(),
+          ),
+        );
+        return;
+      }
+      if (error is DownloadFailureException && error.reason == 429) {
+        _parkForNetwork(
+          job,
+          ServiceFailure(
+            NetworkFailureKind.http,
+            stage: 'download',
+            status: 429,
+            host: error.host,
+            retryAfter: const Duration(minutes: 5),
+          ),
+        );
+        return;
+      }
       _replaceJob(
         job.copyWith(
           status: DownloadStatus.failed,
@@ -2486,11 +2847,18 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
   }
 
   Map<String, dynamic> _jobToRecord(DownloadJob job) => {
-    'schema': 3,
+    'schema': 4,
     'id': job.id,
     'title': job.title,
     'status': job.status.name,
     'progress': job.progress,
+    'receivedBytes': job.receivedBytes,
+    'totalBytes': job.totalBytes,
+    'completedBytes': job.completedBytes,
+    'lastProgressAt': job.lastProgressAt?.toIso8601String(),
+    'retryCount': job.retryCount,
+    'retryAt': job.retryAt?.toIso8601String(),
+    'rateLimitUntil': _rateLimitUntil?.toIso8601String(),
     'localPath': job.localPath,
     'platformId': job.platformId,
     'error': job.error,
@@ -2544,6 +2912,11 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     final jobs = <DownloadJob>[];
     for (final record in records) {
       try {
+        final cooldown = _date(record['rateLimitUntil']);
+        if (cooldown != null &&
+            (_rateLimitUntil == null || cooldown.isAfter(_rateLimitUntil!))) {
+          _rateLimitUntil = cooldown;
+        }
         final media = Map<String, dynamic>.from(record['mediaTitle'] as Map);
         final source = Map<String, dynamic>.from(record['source'] as Map);
         final id = '${record['id']}';
@@ -2601,6 +2974,12 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
                     DownloadStatus.complete,
                   ),
             progress: (record['progress'] as num?)?.toDouble() ?? 1,
+            receivedBytes: (record['receivedBytes'] as num?)?.toInt() ?? 0,
+            totalBytes: (record['totalBytes'] as num?)?.toInt(),
+            completedBytes: (record['completedBytes'] as num?)?.toInt(),
+            lastProgressAt: _date(record['lastProgressAt']),
+            retryCount: (record['retryCount'] as num?)?.toInt() ?? 0,
+            retryAt: _date(record['retryAt']),
             localPath: record['localPath'] as String?,
             platformId: record['platformId'] as String?,
             // Before 1.2.10 this exact text was emitted for Android 1008.

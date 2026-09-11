@@ -3,6 +3,25 @@
 Installable files are available in [GitHub Releases](https://github.com/QuintonD/torbridge/releases).
 Android and Windows can have different current versions.
 
+## Android and Windows 1.2.14 - 2026-09-11
+
+- Persist complete episode batches before discovery; refresh links at execution
+  and stop stale URL reuse after refresh timeouts.
+- Back off network recovery with a persisted schedule and five-attempt automatic
+  limit; honor rate-limit cooldowns and preserve native paused transfers.
+- Reconcile native enqueue/save gaps and stop ambiguous ownership from starting
+  another transfer.
+- Add non-destructive file/native/journal inventory and transfer progress details.
+  Reject obvious error payloads and detect recorded-size mismatches, including
+  retained files truncated after completion. Unknown integrity stays unverified.
+- Bound Windows transfer concurrency to two.
+
+Application queue advancement still requires TorBridge open. A failed native
+resume can require a fresh transfer from zero. No automatic cleanup or reset.
+[Plan and review](docs/download-integrity-and-queue-plan.md) -
+[Release notes](docs/releases/v1.2.14.md).
+
+
 ## Android and Windows 1.2.13 - 2026-09-11
 
 - Pause pending downloads after DNS, connection, or link-preparation timeout
