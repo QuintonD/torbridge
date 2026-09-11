@@ -61,7 +61,7 @@ folder. It leaves user settings and downloaded media untouched.
 New releases include `SHA256SUMS.txt`. On Windows, compare its entry with:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 -LiteralPath .\TorBridge-Android-1.2.12-arm64.apk
+Get-FileHash -Algorithm SHA256 -LiteralPath .\TorBridge-Android-1.2.13-arm64.apk
 ```
 
 Only install release files from this repository. The files GitHub labels
