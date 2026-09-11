@@ -3,6 +3,16 @@
 Installable files are available in [GitHub Releases](https://github.com/QuintonD/torbridge/releases).
 Android and Windows can have different current versions.
 
+## Android and Windows 1.2.15 - 2026-09-11
+
+- Enable encrypted phone-to-phone setup with Android QR export and import.
+- Keep pairing dialogs usable on small screens and use sender-neutral guidance.
+- Fix a race where an old transfer could cancel a new QR session.
+- Preserve settings on the sender and all downloaded files on both devices.
+
+[Setup guide and review](docs/phone-setup-transfer.md) -
+[Release notes](docs/releases/v1.2.15.md).
+
 ## Android and Windows 1.2.14 - 2026-09-11
 
 - Persist complete episode batches before discovery; refresh links at execution

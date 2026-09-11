@@ -108,14 +108,14 @@ class _DeviceTransferCard extends ConsumerWidget {
             const SizedBox(height: 6),
             Text(
               isDesktop
-                  ? 'Move connections and download rules to TorBridge Mobile with one encrypted QR transfer.'
-                  : 'Scan a QR shown by TorBridge Desktop to import its connections and download rules.',
+                  ? 'Copy connections and download rules to a phone with an encrypted QR transfer.'
+                  : 'Copy setup to another phone, or scan a setup QR from a phone or desktop.',
               style: TextStyle(
                 color: Theme.of(context).colorScheme.onSurfaceVariant,
               ),
             ),
             const SizedBox(height: 16),
-            if (isDesktop)
+            if (isDesktop || isAndroid)
               FilledButton.tonalIcon(
                 key: const Key('show-setup-qr'),
                 onPressed: () => showDialog<void>(
@@ -130,8 +130,9 @@ class _DeviceTransferCard extends ConsumerWidget {
                 ),
                 icon: const Icon(Icons.qr_code_2),
                 label: const Text('Show setup QR'),
-              )
-            else if (isAndroid)
+              ),
+            if (isAndroid) ...[
+              const SizedBox(height: 8),
               FilledButton.tonalIcon(
                 key: const Key('scan-setup-qr'),
                 onPressed: () => showDialog<void>(
@@ -140,9 +141,10 @@ class _DeviceTransferCard extends ConsumerWidget {
                   builder: (_) => const _SetupScannerDialog(),
                 ),
                 icon: const Icon(Icons.qr_code_scanner),
-                label: const Text('Scan desktop QR'),
-              )
-            else
+                label: const Text('Scan setup QR'),
+              ),
+            ],
+            if (!isDesktop && !isAndroid)
               const Text('QR import is available on Android.'),
             const SizedBox(height: 10),
             Text(
@@ -185,6 +187,7 @@ class _SetupQrDialogState extends ConsumerState<_SetupQrDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
+      scrollable: true,
       title: const Text('Scan with TorBridge Mobile'),
       content: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 420),
@@ -242,21 +245,23 @@ class _SetupQrDialogState extends ConsumerState<_SetupQrDialog> {
                 ),
                 const SizedBox(height: 10),
                 Text(
-                  'Includes ${offer.includedItems.join(', ')}. Keep this window open and both devices on the same network.',
+                  'Includes ${offer.includedItems.join(', ')}. Keep this screen open, both devices unlocked and on the same Wi-Fi. On the receiving phone, open Settings > Transfer setup > Scan setup QR.',
                   textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  'No credentials are stored in the QR. The encrypted transfer can be claimed once and expires after 5 minutes.',
+                  'Only scan with your receiving phone: this QR grants access to your setup. The encrypted transfer can be claimed once and expires after 5 minutes. Close and reopen to create a new QR.',
                   textAlign: TextAlign.center,
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
-                const SizedBox(height: 6),
-                Text(
-                  'If Windows asks, allow TorBridge on Private networks only.',
-                  textAlign: TextAlign.center,
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
+                if (defaultTargetPlatform == TargetPlatform.windows) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    'If Windows asks, allow TorBridge on Private networks only.',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
               ],
             );
           },
@@ -300,9 +305,8 @@ class _SetupScannerDialogState extends ConsumerState<_SetupScannerDialog> {
   Widget build(BuildContext context) {
     final received = _received;
     return AlertDialog(
-      title: Text(
-        received == null ? 'Scan desktop QR' : 'Confirm setup import',
-      ),
+      scrollable: true,
+      title: Text(received == null ? 'Scan setup QR' : 'Confirm setup import'),
       content: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 440),
         child: received == null
@@ -342,9 +346,7 @@ class _SetupScannerDialogState extends ConsumerState<_SetupScannerDialog> {
         ),
         const SizedBox(height: 12),
         Text(
-          _processing
-              ? 'Connecting securely to the desktop…'
-              : 'Point the camera at the QR code shown in TorBridge Desktop.',
+          _processing ? 'Connecting securely to the sending device…' : 'Point the camera at the setup QR in TorBridge on the other phone or desktop.',
           textAlign: TextAlign.center,
         ),
         if (_error != null) ...[
@@ -380,7 +382,7 @@ class _SetupScannerDialogState extends ConsumerState<_SetupScannerDialog> {
         ),
         const SizedBox(height: 6),
         const Text(
-          'Confirm this matches the code on the desktop.',
+          'Confirm this matches the code on the sending device.',
           textAlign: TextAlign.center,
         ),
         const SizedBox(height: 18),
@@ -627,6 +629,7 @@ class _PreferenceCard extends StatelessWidget {
             const SizedBox(height: 8),
             DropdownButtonFormField<int>(
               key: const Key('watched-cleanup-delay'),
+              isExpanded: true,
               initialValue: preferences.deleteWatchedAfterDays ?? -1,
               decoration: const InputDecoration(
                 labelText: 'Remove watched downloads',

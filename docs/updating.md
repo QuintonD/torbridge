@@ -40,6 +40,13 @@ without deleting them. Header/size checks cannot prove full video integrity.
 Review the [file and queue investigation](download-integrity-and-queue-plan.md)
 when interpreting unverified or incomplete results.
 
+From 1.2.15, a configured Android phone can send its setup to another phone.
+Update both phones, then use **Settings > Transfer setup > Show setup QR** on
+the sender and **Scan setup QR** on the receiver. Keep both phones unlocked on
+the same Wi-Fi, compare the codes, and confirm the import. Connections and
+download rules are copied; local files and watched history are not.
+See the [phone setup guide](phone-setup-transfer.md).
+
 If Android refuses an update, note its exact message and your currently installed
 version. Do not uninstall as a first troubleshooting step. Report the details in
 [a bug report](https://github.com/QuintonD/torbridge/issues/new?template=bug_report.yml).

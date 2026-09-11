@@ -99,4 +99,44 @@ void main() {
       ),
     );
   });
+
+  test('closing or replacing a sender invalidates its previous QR', () async {
+    const bundle = SetupTransferBundle(
+      connections: StoredConnections(torBoxToken: 'fixture'),
+      preferences: DownloadPreferences(),
+    );
+    final first = await desktop.startOffer(bundle);
+    final second = await desktop.startOffer(bundle);
+    await expectLater(
+      mobile.redeem(first.uri.toString()),
+      throwsA(isA<SetupTransferException>()),
+    );
+    final received = await mobile.redeem(second.uri.toString());
+    expect(received.bundle.connections.torBoxToken, 'fixture');
+    final third = await desktop.startOffer(bundle);
+    await desktop.stopOffer();
+    await expectLater(
+      mobile.redeem(third.uri.toString()),
+      throwsA(isA<SetupTransferException>()),
+    );
+  });
+
+  test('expired QR cannot be redeemed', () async {
+    final sender = SetupTransferService(
+      offerLifetime: const Duration(milliseconds: 30),
+      addressResolver: () async => InternetAddress.loopbackIPv4,
+    );
+    addTearDown(sender.stopOffer);
+    final offer = await sender.startOffer(
+      const SetupTransferBundle(
+        connections: StoredConnections(torBoxToken: 'fixture'),
+        preferences: DownloadPreferences(),
+      ),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 80));
+    await expectLater(
+      mobile.redeem(offer.uri.toString()),
+      throwsA(isA<SetupTransferException>()),
+    );
+  });
 }
