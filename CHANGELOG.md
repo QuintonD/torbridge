@@ -16,7 +16,10 @@ Android and Windows can have different current versions.
 - Correct the ambiguous Android HTTP 400 label and unverified empty-library
   storage-protection result. Fix immediate-resume and restored-queue races.
 
-[Diagnosis and patch review](docs/pixel-network-diagnosis.md).
+Validation: 101 host tests, six native API 36 tests, clean analysis, signed APK
+metadata/ABI verification, and an in-place emulator upgrade preserving app data.
+[Diagnosis and patch review](docs/pixel-network-diagnosis.md) -
+[Release notes](docs/releases/v1.2.13.md).
 Physical Pixel 7a / Android 17 and live provider transfers remain unverified.
 
 ## Android and Windows 1.2.12 - 2026-09-10
