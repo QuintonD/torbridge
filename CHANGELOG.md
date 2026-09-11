@@ -18,6 +18,8 @@ Android and Windows can have different current versions.
 
 Application queue advancement still requires TorBridge open. A failed native
 resume can require a fresh transfer from zero. No automatic cleanup or reset.
+Validation: 114 host tests, ten native API 36 tests, clean analysis, preserved-data
+upgrade, signed APK/ABI checks, complete Windows ZIP, and uploaded checksum verification.
 [Plan and review](docs/download-integrity-and-queue-plan.md) -
 [Release notes](docs/releases/v1.2.14.md).
 
