@@ -5,10 +5,79 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:torbridge/services/download_service.dart';
+import 'package:torbridge/services/network_diagnostics.dart';
 import 'package:torbridge/services/stremio_bridge_service.dart';
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+
+  testWidgets(
+    'Android reports network configuration and a real failed DNS lookup',
+    (tester) async {
+      await tester.pumpWidget(const MaterialApp(home: SizedBox()));
+      final diagnostics = NetworkDiagnostics(
+        timeout: const Duration(seconds: 5),
+      );
+      final info = await diagnostics.deviceNetwork();
+      expect(info['api'], isA<int>());
+      expect(info['vpn'], isA<bool>());
+      expect(
+        info['privateDns'],
+        isIn(['custom', 'active', 'inactive', 'unavailable']),
+      );
+      expect(info.keys, isNot(contains('dnsServers')));
+      await expectLater(
+        diagnostics.resolve('torbridge-fixture.invalid'),
+        throwsA(
+          isA<ServiceFailure>().having(
+            (e) => e.canWaitForNetwork,
+            'network wait',
+            isTrue,
+          ),
+        ),
+      );
+    },
+  );
+
+  testWidgets(
+    'Android can report 400 without a server response when HTTP is blocked',
+    (tester) async {
+      await tester.pumpWidget(const MaterialApp(home: SizedBox()));
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      var requests = 0;
+      server.listen((request) {
+        requests++;
+        request.response.close();
+      });
+      final service = AndroidSystemDownloadService();
+      String? id;
+      try {
+        // Debug allows 127.0.0.1 only. localhost retains the release's HTTP policy.
+        await expectLater(
+          service
+              .download(
+                jobId: 'blocked-http',
+                url: Uri.parse('http://localhost:${server.port}/fixture.mp4'),
+                suggestedName: 'blocked-fixture.mp4',
+                onProgress: (_, _) {},
+                onEnqueued: (value) => id = value,
+              )
+              .timeout(const Duration(seconds: 30)),
+          throwsA(
+            isA<DownloadFailureException>().having(
+              (e) => e.reason,
+              'reason',
+              400,
+            ),
+          ),
+        );
+        expect(requests, 0);
+      } finally {
+        await service.cancel(jobId: 'blocked-http', platformId: id);
+        await server.close(force: true);
+      }
+    },
+  );
 
   for (final reason in [400, 1008]) {
     testWidgets(

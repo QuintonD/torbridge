@@ -26,11 +26,13 @@ import 'package:torbridge/integrations/cinemeta_client.dart';
 import 'package:torbridge/integrations/torbox_client.dart';
 import 'package:torbridge/services/credential_store.dart';
 import 'package:torbridge/services/download_service.dart';
+import 'package:torbridge/services/network_diagnostics.dart';
 import 'package:torbridge/services/local_state_store.dart';
 import 'package:torbridge/services/setup_transfer_service.dart';
 import 'package:torbridge/services/stremio_bridge_service.dart';
 
 void main() {
+  pixelNetworkRegressions();
   auditProbes();
   downloadRecoveryRegressions();
   for (final schema in [2, 3]) {
@@ -109,7 +111,10 @@ void main() {
         );
         await tester.pump();
         expect(controller.state.downloads.single.status, DownloadStatus.queued);
-        expect(service.cancelled, ['failed-attempt']);
+        expect(
+          service.cancelled,
+          isEmpty,
+        ); // Keep the old job until preparation succeeds.
         if (cancel) {
           await controller.cancelDownload(controller.state.downloads.single);
         }
@@ -1989,6 +1994,548 @@ void downloadRecoveryRegressions() {
         isNot(contains('from streams')),
       );
       expect(torBox.requestedFileId, isNull);
+    },
+  );
+}
+
+class _NetworkTorBox extends _FakeTorBoxClient {
+  bool offline = true;
+  bool unauthorized = false;
+  int validations = 0;
+  @override
+  Future<void> validateToken() async {
+    validations++;
+    if (unauthorized) {
+      final options = RequestOptions(
+        path: 'https://api.torbox.app/v1/api/user/me',
+      );
+      throw DioException(
+        requestOptions: options,
+        type: DioExceptionType.badResponse,
+        response: Response(requestOptions: options, statusCode: 401),
+      );
+    }
+  }
+
+  @override
+  Future<Uri> requestDownloadLink({
+    required int torrentId,
+    required int fileId,
+  }) async {
+    if (offline) {
+      throw DioException(
+        requestOptions: RequestOptions(
+          path: 'https://api.torbox.app/requestdl?token=fixture-secret',
+        ),
+        type: DioExceptionType.connectionError,
+        error: const SocketException(
+          "Failed host lookup: 'api.torbox.app'",
+          osError: OSError('No address associated with hostname', 7),
+        ),
+      );
+    }
+    return Uri.parse('https://torbox.example/fresh');
+  }
+}
+
+class _NetworkRecoveryDownloads extends _BatchFallbackDownloadService {
+  bool failCancel = false;
+  bool cdnDnsFails = false;
+  @override
+  Future<String> download({
+    required String jobId,
+    required Uri url,
+    required String suggestedName,
+    required DownloadProgressCallback onProgress,
+    DownloadEnqueuedCallback? onEnqueued,
+    Map<String, String> requestHeaders = const {},
+  }) async {
+    if (cdnDnsFails && url.host == 'torbox.example') {
+      throw DioException(
+        requestOptions: RequestOptions(path: url.toString()),
+        type: DioExceptionType.connectionError,
+        error: const SocketException("Failed host lookup: 'torbox.example'"),
+      );
+    }
+    return super.download(
+      jobId: jobId,
+      url: url,
+      suggestedName: suggestedName,
+      onProgress: onProgress,
+      onEnqueued: onEnqueued,
+      requestHeaders: requestHeaders,
+    );
+  }
+
+  @override
+  bool get supportsResume => true;
+  final cancelled = <String?>[];
+  @override
+  Future<void> cancel({required String jobId, String? platformId}) async {
+    if (failCancel) throw StateError('Fixture cancellation failed');
+    cancelled.add(platformId);
+  }
+
+  @override
+  int get maxConcurrentDownloads => 1;
+}
+
+class _ConcurrentRestoredDownloads extends _SerialFixtureDownloads {
+  @override
+  int get maxConcurrentDownloads => 2;
+}
+
+class _NetworkAddon extends AioStreamsClient {
+  bool validManifest = true;
+  int manifestChecks = 0;
+  @override
+  Future<Map<String, dynamic>> getManifest(Uri manifestUrl) async {
+    manifestChecks++;
+    return validManifest
+        ? {
+            'id': 'fixture',
+            'resources': ['stream'],
+          }
+        : {};
+  }
+
+  @override
+  Future<List<StreamCandidate>> getStreams({
+    required Uri manifestUrl,
+    required String type,
+    required String videoId,
+  }) async {
+    throw DioException(
+      requestOptions: RequestOptions(
+        path: 'https://addon.example/fixture-secret/stream.json',
+      ),
+      type: DioExceptionType.connectionError,
+      error: const SocketException("Failed host lookup: 'addon.example'"),
+    );
+  }
+
+  @override
+  Future<List<StreamCandidate>> getTorrentioStreams({
+    required String type,
+    required String videoId,
+  }) async => [];
+}
+
+class _NetworkProbeFixture extends NetworkDiagnostics {
+  bool dnsFails = true;
+  final lookups = <String>[];
+  @override
+  Future<String> resolve(String host) async {
+    lookups.add(host);
+    if (dnsFails && host == 'api.torbox.app') {
+      throw ServiceFailure(
+        NetworkFailureKind.dns,
+        stage: 'DNS check',
+        host: host,
+      );
+    }
+    return 'DNS resolved $host';
+  }
+
+  @override
+  Future<Map<String, dynamic>> deviceNetwork() async => {
+    'api': 36,
+    'connected': true,
+    'validated': true,
+    'vpn': false,
+    'privateDns': 'inactive',
+  };
+}
+
+void pixelNetworkRegressions() {
+  test(
+    'a fallback media CDN DNS failure names the CDN rather than the API',
+    () async {
+      final service = _NetworkRecoveryDownloads()..cdnDnsFails = true;
+      final torBox = _NetworkTorBox()..offline = false;
+      final controller = TorBridgeController(
+        service,
+        _FakeBridge(),
+        _MemoryCredentials()
+          ..value = const StoredConnections(torBoxToken: 'token'),
+        CinemetaClient(),
+        AioStreamsClient(),
+        _MemoryStateStore(),
+        (_) => torBox,
+      );
+      addTearDown(controller.dispose);
+      await controller.initialize();
+      await controller.downloadCandidate(_fallbackCandidate);
+      expect(
+        controller.state.downloads.single.status,
+        DownloadStatus.waitingForNetwork,
+      );
+      expect(
+        controller.state.downloads.single.error,
+        contains('torbox.example'),
+      );
+      expect(
+        controller.state.downloads.single.error,
+        isNot(contains('api.torbox.app')),
+      );
+    },
+  );
+
+  test(
+    'Diagnostics fetches and validates the configured addon manifest',
+    () async {
+      final addon = _NetworkAddon();
+      final controller = TorBridgeController(
+        _RecordingDownloadService(),
+        _FakeBridge(),
+        _MemoryCredentials()
+          ..value = const StoredConnections(
+            aioManifestUrl:
+                'https://addon.example/fixture-secret/manifest.json',
+          ),
+        CinemetaClient(),
+        addon,
+        _MemoryStateStore(),
+        null,
+        null,
+        _NetworkProbeFixture()..dnsFails = false,
+      );
+      addTearDown(controller.dispose);
+      await controller.initialize();
+      await controller.runDiagnostics();
+      expect(addon.manifestChecks, 1);
+      expect(
+        controller.state.diagnosticChecks['AIOStreams']?.severity,
+        DiagnosticSeverity.success,
+      );
+      addon.validManifest = false;
+      await controller.runDiagnostics();
+      expect(
+        controller.state.diagnosticChecks['AIOStreams']?.severity,
+        DiagnosticSeverity.error,
+      );
+      expect(
+        controller.state.diagnosticChecks['AIOStreams']?.detail,
+        isNot(contains('fixture-secret')),
+      );
+    },
+  );
+
+  test(
+    'source discovery DNS failure parks retry instead of reporting no sources',
+    () async {
+      final service = _NetworkRecoveryDownloads();
+      final store = _MemoryStateStore()
+        ..value = StoredLocalState(
+          downloadRecords: [
+            {..._savedTransfer('old', platformId: '101'), 'status': 'failed'},
+          ],
+        );
+      final controller = TorBridgeController(
+        service,
+        _FakeBridge(),
+        _MemoryCredentials()
+          ..value = const StoredConnections(
+            aioManifestUrl: 'https://addon.example/manifest.json',
+            torBoxToken: 'token',
+          ),
+        CinemetaClient(),
+        _NetworkAddon(),
+        store,
+        (_) => _NetworkTorBox(),
+      );
+      addTearDown(controller.dispose);
+      await controller.initialize();
+      await controller.retryDownload(controller.state.downloads.single);
+      expect(
+        controller.state.downloads.single.status,
+        DownloadStatus.waitingForNetwork,
+      );
+      expect(
+        controller.state.downloads.single.error,
+        contains('addon.example'),
+      );
+      expect(
+        controller.state.downloads.single.error,
+        isNot(contains('fixture-secret')),
+      );
+      expect(controller.state.downloads.single.platformId, '101');
+      expect(service.cancelled, isEmpty);
+      expect(service.urls, isEmpty);
+    },
+  );
+
+  testWidgets(
+    'an immediate network resume waits for the failing operation to exit',
+    (tester) async {
+      final service = _NetworkRecoveryDownloads();
+      final torBox = _NetworkTorBox();
+      final controller = TorBridgeController(
+        service,
+        _FakeBridge(),
+        _MemoryCredentials()
+          ..value = const StoredConnections(torBoxToken: 'token'),
+        CinemetaClient(),
+        AioStreamsClient(),
+        _MemoryStateStore(),
+        (_) => torBox,
+      );
+      await controller.initialize();
+      var resumed = false;
+      final stop = controller.addListener((state) {
+        if (!resumed &&
+            state.downloads.any(
+              (job) => job.status == DownloadStatus.waitingForNetwork,
+            )) {
+          resumed = true;
+          scheduleMicrotask(() {
+            torBox.offline = false;
+            controller.resumeWaitingDownloads();
+          });
+        }
+      });
+      await controller.downloadCandidate(_fallbackCandidate);
+      await tester.pump();
+      expect(resumed, isTrue);
+      expect(controller.state.downloads.single.status, DownloadStatus.complete);
+      expect(
+        service.urls.where((url) => url.host == 'torbox.example'),
+        hasLength(1),
+      );
+      stop();
+      controller.dispose();
+    },
+  );
+
+  testWidgets(
+    'a late restored native failure joins the paused queue without deletion',
+    (tester) async {
+      final service = _ConcurrentRestoredDownloads();
+      final store = _MemoryStateStore()
+        ..value = StoredLocalState(
+          downloadRecords: [
+            _savedTransfer('old1', platformId: '101'),
+            _savedTransfer('old2', platformId: '102'),
+          ],
+        );
+      final controller = TorBridgeController(
+        service,
+        _FakeBridge(),
+        _MemoryCredentials()
+          ..value = const StoredConnections(torBoxToken: 'token'),
+        CinemetaClient(),
+        AioStreamsClient(),
+        store,
+        (_) => _NetworkTorBox(),
+      );
+      await controller.initialize();
+      await tester.pump();
+      service.restored['old1']!.completeError(
+        const DownloadFailureException(1008),
+      );
+      await tester.pump();
+      expect(
+        controller.state.downloads.first.status,
+        DownloadStatus.waitingForNetwork,
+      );
+      service.restored['old2']!.completeError(
+        const DownloadFailureException(1008),
+      );
+      await tester.pump();
+      expect(
+        controller.state.downloads.last.status,
+        DownloadStatus.waitingForNetwork,
+      );
+      expect(service.transfers, isEmpty);
+      expect(service.deleted, isEmpty);
+      expect(controller.state.downloads.first.platformId, '101');
+      controller.dispose();
+    },
+  );
+
+  test(
+    'failed retirement preserves the old native ID and starts no replacement',
+    () async {
+      final service = _NetworkRecoveryDownloads()..failCancel = true;
+      final store = _MemoryStateStore()
+        ..value = StoredLocalState(
+          downloadRecords: [
+            {..._savedTransfer('old', platformId: '101'), 'status': 'failed'},
+          ],
+        );
+      final torBox = _NetworkTorBox()..offline = false;
+      final controller = TorBridgeController(
+        service,
+        _FakeBridge(),
+        _MemoryCredentials()
+          ..value = const StoredConnections(torBoxToken: 'token'),
+        CinemetaClient(),
+        AioStreamsClient(),
+        store,
+        (_) => torBox,
+      );
+      addTearDown(controller.dispose);
+      await controller.initialize();
+      await controller.retryDownload(controller.state.downloads.single);
+      expect(controller.state.downloads.single.platformId, '101');
+      expect(controller.state.downloads.single.status, DownloadStatus.failed);
+      expect(service.urls, isEmpty);
+      expect(service.cancelled, isEmpty);
+      expect(store.value.downloadRecords.single['platformId'], '101');
+    },
+  );
+
+  testWidgets(
+    'Pixel DNS failure keeps the native ID, waits, and resumes with a fresh link',
+    (tester) async {
+      final service = _NetworkRecoveryDownloads();
+      final torBox = _NetworkTorBox();
+      final store = _MemoryStateStore();
+      final credentials = _MemoryCredentials()
+        ..value = const StoredConnections(torBoxToken: 'token');
+      final controller = TorBridgeController(
+        service,
+        _FakeBridge(),
+        credentials,
+        CinemetaClient(),
+        AioStreamsClient(),
+        store,
+        (_) => torBox,
+      );
+      await controller.initialize();
+      await controller.downloadCandidate(_fallbackCandidate);
+      expect(
+        controller.state.downloads.single.status,
+        DownloadStatus.waitingForNetwork,
+      );
+      final oldId = controller.state.downloads.single.platformId;
+      expect(oldId, isNotNull);
+      expect(service.cancelled, isEmpty);
+      expect(
+        controller.state.downloads.single.error,
+        contains('api.torbox.app'),
+      );
+      expect(
+        controller.state.downloads.single.error,
+        isNot(contains('streams.example')),
+      );
+      expect(
+        store.value.downloadRecords.single['error'].toString(),
+        isNot(contains('fixture-secret')),
+      );
+      torBox.offline = false;
+      controller.resumeWaitingDownloads();
+      controller.resumeWaitingDownloads(); // A double tap must not enqueue duplicates.
+      await tester.pump();
+      expect(controller.state.downloads.single.status, DownloadStatus.complete);
+      expect(
+        service.urls.where((url) => url.host == 'torbox.example'),
+        hasLength(1),
+      );
+      expect(service.cancelled.first, oldId);
+      controller.dispose();
+    },
+  );
+
+  testWidgets(
+    'restored network wait does not restart or delete until explicitly resumed',
+    (tester) async {
+      final service = _NetworkRecoveryDownloads();
+      final store = _MemoryStateStore()
+        ..value = StoredLocalState(
+          downloadRecords: [
+            {
+              ..._savedTransfer('saved', platformId: '101'),
+              'status': 'failed',
+              'error': "Android could not resume; DioException: Failed host lookup: 'api.torbox.app' from torrentio.example",
+            },
+            _savedTransfer('queued'),
+          ],
+        );
+      final torBox = _NetworkTorBox();
+      final credentials = _MemoryCredentials()
+        ..value = const StoredConnections(torBoxToken: 'token');
+      final controller = TorBridgeController(
+        service,
+        _FakeBridge(),
+        credentials,
+        CinemetaClient(),
+        AioStreamsClient(),
+        store,
+        (_) => torBox,
+      );
+      await controller.initialize();
+      await tester.pump();
+      expect(service.urls, isEmpty);
+      expect(service.cancelled, isEmpty);
+      expect(
+        controller.state.downloads.every(
+          (job) => job.status == DownloadStatus.waitingForNetwork,
+        ),
+        isTrue,
+      );
+      await controller.cancelDownload(controller.state.downloads.last);
+      expect(controller.state.downloads, hasLength(1));
+      expect(controller.state.downloads.single.platformId, '101');
+      controller.dispose();
+    },
+  );
+
+  test(
+    'Diagnostics distinguishes DNS failure, rejected token, and reachable API',
+    () async {
+      final network = _NetworkProbeFixture();
+      final torBox = _NetworkTorBox();
+      final credentials = _MemoryCredentials()
+        ..value = const StoredConnections(torBoxToken: 'token');
+      final controller = TorBridgeController(
+        _RecordingDownloadService(),
+        _FakeBridge(),
+        credentials,
+        CinemetaClient(),
+        AioStreamsClient(),
+        _MemoryStateStore(),
+        (_) => torBox,
+        null,
+        network,
+      );
+      addTearDown(controller.dispose);
+      await controller.initialize();
+      await controller.runDiagnostics();
+      expect(
+        controller.state.diagnosticChecks['TorBox DNS']?.severity,
+        DiagnosticSeverity.error,
+      );
+      expect(torBox.validations, 0);
+      expect(
+        controller
+            .state
+            .diagnosticChecks['Offline storage protection']
+            ?.severity,
+        DiagnosticSeverity.info,
+      );
+      expect(
+        controller.state.diagnosticChecks['Android network']?.detail,
+        contains('Private DNS inactive'),
+      );
+      network.dnsFails = false;
+      torBox.unauthorized = true;
+      await controller.runDiagnostics();
+      expect(
+        controller.state.diagnosticChecks['TorBox DNS']?.severity,
+        DiagnosticSeverity.success,
+      );
+      expect(
+        controller.state.diagnosticChecks['TorBox']?.detail,
+        contains('401'),
+      );
+      torBox.unauthorized = false;
+      await controller.runDiagnostics();
+      expect(
+        controller.state.diagnosticChecks['TorBox']?.severity,
+        DiagnosticSeverity.success,
+      );
+      expect(controller.state.diagnosticsRunning, isFalse);
     },
   );
 }

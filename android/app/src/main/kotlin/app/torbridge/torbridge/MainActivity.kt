@@ -21,6 +21,27 @@ class MainActivity : FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, downloadChannelName)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
+                    "networkInfo" -> try {
+                        val connectivity = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+                        val network = connectivity.activeNetwork
+                        val capabilities = connectivity.getNetworkCapabilities(network)
+                        val properties = connectivity.getLinkProperties(network)
+                        result.success(mapOf(
+                            "api" to Build.VERSION.SDK_INT,
+                            "connected" to (network != null),
+                            "validated" to (capabilities?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true),
+                            "vpn" to (capabilities?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) == true),
+                            "privateDns" to if (Build.VERSION.SDK_INT >= 28) {
+                                when {
+                                    properties?.privateDnsServerName != null -> "custom"
+                                    properties?.isPrivateDnsActive == true -> "active"
+                                    else -> "inactive"
+                                }
+                            } else "unavailable"
+                        ))
+                    } catch (_: Exception) {
+                        result.error("network_check_failed", "Could not inspect the active network.", null)
+                    }
                     "availableBytes" -> try {
                         val directory = getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: filesDir
                         result.success(android.os.StatFs(directory.absolutePath).availableBytes)

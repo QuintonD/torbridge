@@ -23,11 +23,17 @@ class DiagnosticsScreen extends ConsumerWidget {
             subtitle: 'Check local playback, downloaded files, and connected services.',
             trailing: FilledButton.tonalIcon(
               key: const Key('run-diagnostics'),
-              onPressed: () => unawaited(
-                ref.read(torBridgeControllerProvider.notifier).runDiagnostics(),
-              ),
+              onPressed: state.diagnosticsRunning
+                  ? null
+                  : () => unawaited(
+                      ref
+                          .read(torBridgeControllerProvider.notifier)
+                          .runDiagnostics(),
+                    ),
               icon: const Icon(Icons.health_and_safety_outlined),
-              label: const Text('Run checks'),
+              label: Text(
+                state.diagnosticsRunning ? 'Checking…' : 'Run checks',
+              ),
             ),
           ),
           const SizedBox(height: 22),

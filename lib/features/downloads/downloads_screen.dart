@@ -57,6 +57,18 @@ class _DownloadsScreenState extends ConsumerState<DownloadsScreen> {
                   ),
                 ),
                 const SizedBox(height: 22),
+                if (state.downloads.any(
+                  (job) => job.status == DownloadStatus.waitingForNetwork,
+                ))
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: FilledButton.tonalIcon(
+                      key: const Key('resume-network-downloads'),
+                      onPressed: controller.resumeWaitingDownloads,
+                      icon: const Icon(Icons.wifi),
+                      label: const Text('Resume waiting downloads'),
+                    ),
+                  ),
                 if (state.notice != null)
                   Padding(
                     padding: const EdgeInsets.only(bottom: 12),
@@ -428,6 +440,7 @@ class _DownloadTile extends ConsumerWidget {
     DownloadStatus.complete => 'Ready offline',
     DownloadStatus.unavailable =>
       'File unavailable — ${job.error ?? 'Retry the download while online.'}',
+    DownloadStatus.waitingForNetwork => job.error ?? 'Waiting for the network. Run Diagnostics, then resume waiting downloads.',
     DownloadStatus.failed =>
       'Download failed — ${job.error ?? 'unknown error'}',
   };
