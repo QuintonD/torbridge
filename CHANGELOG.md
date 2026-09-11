@@ -3,6 +3,25 @@
 Installable files are available in [GitHub Releases](https://github.com/QuintonD/torbridge/releases).
 Android and Windows can have different current versions.
 
+## Android and Windows 1.2.13 - 2026-09-11
+
+- Pause pending downloads after DNS, connection, or link-preparation timeout
+  failures. Persist waiting records and resume explicitly with fresh links.
+- Keep failed Android native jobs until a replacement URL and storage check
+  succeed; preserve the record when retirement fails.
+- Check actual service DNS, TorBox token acceptance, and addon manifest access
+  in Diagnostics. Show Android network, VPN, Private DNS mode, and check time.
+- Replace raw connection exceptions with safe request-host and stage messages;
+  migrate saved DNS errors without clearing settings or downloaded files.
+- Correct the ambiguous Android HTTP 400 label and unverified empty-library
+  storage-protection result. Fix immediate-resume and restored-queue races.
+
+Validation: 101 host tests, six native API 36 tests, clean analysis, signed APK
+metadata/ABI verification, and an in-place emulator upgrade preserving app data.
+[Diagnosis and patch review](docs/pixel-network-diagnosis.md) -
+[Release notes](docs/releases/v1.2.13.md).
+Physical Pixel 7a / Android 17 and live provider transfers remain unverified.
+
 ## Android and Windows 1.2.12 - 2026-09-10
 
 - Include HTTP 400 and restored Android transfers in bounded source recovery.

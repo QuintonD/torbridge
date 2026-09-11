@@ -44,7 +44,7 @@ class DownloadFailureException implements Exception {
   String toString() => description;
 
   static String _httpLabel(int status) => switch (status) {
-    400 => ' (Server rejected the download request)',
+    400 => ' (Request rejected by Android or the server)',
     401 => ' (Unauthorized)',
     403 => ' (Forbidden or expired link)',
     404 => ' (Not Found)',

@@ -26,6 +26,12 @@ If Android closes TorBridge, the active system transfer can continue, but reopen
 the app to start the next queued item. Diagnostics shows available download
 storage; estimates cannot reserve space or guarantee that every queued file fits.
 
+From 1.2.13, DNS and connection failures pause pending downloads. Diagnostics
+checks the service hostname and then the actual API or addon manifest. Once
+those checks pass, choose **Downloads → Resume waiting downloads**. The app
+does not change your DNS or VPN settings. See the
+[network investigation](pixel-network-diagnosis.md) for comparison steps.
+
 If Android refuses an update, note its exact message and your currently installed
 version. Do not uninstall as a first troubleshooting step. Report the details in
 [a bug report](https://github.com/QuintonD/torbridge/issues/new?template=bug_report.yml).
