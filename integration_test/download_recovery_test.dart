@@ -21,6 +21,12 @@ void main() {
       final info = await diagnostics.deviceNetwork();
       expect(info['api'], isA<int>());
       expect(info['vpn'], isA<bool>());
+      expect(info['transport'], isA<String>());
+      expect(info['metered'], isA<bool>());
+      expect(info['dataSaver'], isA<int>());
+      expect(info['batterySaver'], isA<bool>());
+      expect(info['batteryExempt'], isA<bool>());
+      expect(info['backgroundRestricted'], isA<bool>());
       expect(
         info['privateDns'],
         isIn(['custom', 'active', 'inactive', 'unavailable']),
@@ -137,7 +143,12 @@ void main() {
             throwsA(
               isA<DownloadFailureException>()
                   .having((e) => e.host, 'request host', '127.0.0.1')
-                  .having((e) => e.reason, 'Android reason', reason),
+                  .having((e) => e.reason, 'Android reason', reason)
+                  .having(
+                    (e) => e.allowsAutomaticSourceRecovery,
+                    'automatic source replacement',
+                    reason != 1008,
+                  ),
             ),
           );
           final failedId = id;

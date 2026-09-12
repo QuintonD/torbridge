@@ -44,11 +44,24 @@ class MainActivity : FlutterActivity() {
                         val network = connectivity.activeNetwork
                         val capabilities = connectivity.getNetworkCapabilities(network)
                         val properties = connectivity.getLinkProperties(network)
+                        val power = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+                        val activity = getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
                         result.success(mapOf(
                             "api" to Build.VERSION.SDK_INT,
                             "connected" to (network != null),
                             "validated" to (capabilities?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true),
                             "vpn" to (capabilities?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) == true),
+                            "transport" to when {
+                                capabilities?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) == true -> "VPN"
+                                capabilities?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) == true -> "Wi-Fi"
+                                capabilities?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) == true -> "mobile"
+                                else -> "other or absent"
+                            },
+                            "metered" to connectivity.isActiveNetworkMetered,
+                            "dataSaver" to if (Build.VERSION.SDK_INT >= 24) connectivity.restrictBackgroundStatus else 0,
+                            "batterySaver" to power.isPowerSaveMode,
+                            "batteryExempt" to power.isIgnoringBatteryOptimizations(packageName),
+                            "backgroundRestricted" to (Build.VERSION.SDK_INT >= 28 && activity.isBackgroundRestricted),
                             "privateDns" to if (Build.VERSION.SDK_INT >= 28) {
                                 when {
                                     properties?.privateDnsServerName != null -> "custom"

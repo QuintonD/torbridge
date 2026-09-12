@@ -1179,7 +1179,10 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
         );
         return;
       }
-      final failure = error is DownloadFailureException && error.reason == 429
+      final failure =
+          error is DownloadFailureException &&
+              error.reason == 429 &&
+              error.receivedBytes == 0
           ? ServiceFailure(
               NetworkFailureKind.http,
               stage: 'download',
@@ -1209,12 +1212,20 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
         error is HandshakeException) {
       return ServiceFailure.from(error, stage: 'download').toString();
     }
-    final message = error is DownloadFailureException
+    var message = error is DownloadFailureException
         ? error.description
         : error.toString().replaceFirst(
             RegExp(r'^(Bad state|Exception):\s*'),
             '',
           );
+    if (error is DownloadFailureException &&
+        (error.reason == 1008 || error.receivedBytes > 0)) {
+      message +=
+          ' (Android reason ${error.reason}${error.host == null ? '' : '; host ${error.host}'}). '
+          '${error.receivedBytes} bytes observed before failure. '
+          'Automatic restart stopped. Run Diagnostics and check the connection; '
+          'Retry starts a new transfer from zero. Partial file availability is unverified.';
+    }
     final origin = error is DownloadFailureException
         ? error.host ?? source.streamUrl?.host
         : null;
@@ -1306,7 +1317,7 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
     DownloadFailureException originalError,
     void Function(DownloadJob updated) onJobChanged,
   ) async {
-    if (!originalError.isRetryableSourceFailure) throw originalError;
+    if (!originalError.allowsAutomaticSourceRecovery) throw originalError;
     if (!mounted ||
         _removingDownloadIds.contains(job.id) ||
         !state.downloads.any((item) => item.id == job.id)) {
@@ -1329,7 +1340,7 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
           onJobChanged(updated);
         });
       } on DownloadFailureException catch (error) {
-        if (!error.isRetryableSourceFailure) rethrow;
+        if (!error.allowsAutomaticSourceRecovery) rethrow;
         latestError = error;
       } on DownloadStorageException {
         rethrow;
@@ -1348,7 +1359,7 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
           onJobChanged(updated);
         });
       } on DownloadFailureException catch (error) {
-        if (!error.isRetryableSourceFailure) rethrow;
+        if (!error.allowsAutomaticSourceRecovery) rethrow;
         latestError = error;
       }
     }
@@ -1368,7 +1379,7 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
           onJobChanged(updated);
         });
       } on DownloadFailureException catch (error) {
-        if (!error.isRetryableSourceFailure) rethrow;
+        if (!error.allowsAutomaticSourceRecovery) rethrow;
         latestError = error;
         recoverySource = alternative;
       }
@@ -1403,7 +1414,9 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
 
   bool _canRetryThroughTorBox(DownloadFailureException error) {
     final token = state.connections.torBoxToken;
-    return error.isRetryableSourceFailure && token != null && token.isNotEmpty;
+    return error.allowsAutomaticSourceRecovery &&
+        token != null &&
+        token.isNotEmpty;
   }
 
   void _parkForNetwork(DownloadJob job, ServiceFailure failure) {
@@ -1941,7 +1954,7 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
         );
       }
       checks['Queue recovery'] = const DiagnosticCheck(
-        'Android keeps active transfers through app closure and retries interruptions when the server supports resuming. Open TorBridge to advance queued jobs or refresh failed links. Fresh links are requested when each queued job starts; failed transfers may need to restart from zero.',
+        'Android keeps active transfers through app closure and retries interruptions when the server supports resuming. Open TorBridge to advance queued jobs or refresh failed links. Cannot-resume failures and failures after observed byte progress stop for manual review; Retry starts a new transfer from zero.',
         DiagnosticSeverity.info,
       );
     } catch (_) {
@@ -2163,6 +2176,15 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
               'API ${info['api']}; network ${info['connected'] == true ? 'connected' : 'absent'}; '
               'internet ${info['validated'] == true ? 'validated by Android' : 'not validated by Android'}; '
               'VPN ${info['vpn'] == true ? 'active' : 'not reported'}; Private DNS ${info['privateDns']}. '
+              'Transport ${info['transport'] ?? 'unknown'}; metered ${info['metered']}; '
+              'Data Saver ${switch (info['dataSaver']) {
+                1 => 'off',
+                2 => 'app exempt',
+                3 => 'restricted',
+                _ => 'unknown',
+              }}; '
+              'Battery Saver ${info['batterySaver']}; battery exemption ${info['batteryExempt']}; '
+              'background restricted ${info['backgroundRestricted']}. '
               'A VPN such as Tailscale can change DNS or routing even on the same Wi-Fi.',
               info['validated'] == true
                   ? DiagnosticSeverity.info
@@ -2690,7 +2712,19 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
           },
         );
       } on DownloadFailureException catch (error) {
-        if (!error.isRetryableSourceFailure) rethrow;
+        final observed = [
+          original.receivedBytes,
+          job.receivedBytes,
+          error.receivedBytes,
+        ].reduce((a, b) => a > b ? a : b);
+        if (observed > 0) {
+          throw DownloadFailureException(
+            error.reason,
+            host: error.host,
+            receivedBytes: observed,
+          );
+        }
+        if (!error.allowsAutomaticSourceRecovery) rethrow;
         if (!mounted ||
             _removingDownloadIds.contains(job.id) ||
             !state.downloads.any((item) => item.id == job.id)) {
@@ -2747,7 +2781,9 @@ class TorBridgeController extends StateNotifier<TorBridgeState> {
         );
         return;
       }
-      if (error is DownloadFailureException && error.reason == 429) {
+      if (error is DownloadFailureException &&
+          error.reason == 429 &&
+          error.receivedBytes == 0) {
         _parkForNetwork(
           job,
           ServiceFailure(

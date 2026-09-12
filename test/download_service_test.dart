@@ -14,6 +14,7 @@ void main() {
       const conflict = DownloadFailureException(1009);
       expect(interrupted.description, contains('could not resume'));
       expect(interrupted.isRetryableSourceFailure, isTrue);
+      expect(interrupted.allowsAutomaticSourceRecovery, isFalse);
       expect(conflict.description, 'the file already exists');
       expect(conflict.isRetryableSourceFailure, isFalse);
     },
@@ -47,6 +48,45 @@ void main() {
   final messenger =
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
   tearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+  test('Android failed counters retain observed progress and stop automatic recovery', () async {
+    final states = <Map<String, Object>>[
+      {'state': 'downloading', 'downloaded': 190, 'total': 1000},
+      {'state': 'paused', 'reason': 1, 'downloaded': 190, 'total': 1000},
+      {
+        'state': 'failed',
+        'reason': 1008,
+        'downloaded': 0,
+        'total': -1,
+        'host': 'cdn.example',
+      },
+    ];
+    final calls = <String>[];
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      calls.add(call.method);
+      return states.removeAt(0);
+    });
+    final progress = <List<int>>[];
+    await expectLater(
+      AndroidSystemDownloadService().resume(
+        jobId: 'partial',
+        platformId: '123',
+        onProgress: (received, total) => progress.add([received, total]),
+      ),
+      throwsA(
+        isA<DownloadFailureException>()
+            .having((e) => e.receivedBytes, 'observed bytes', 190)
+            .having((e) => e.host, 'host', 'cdn.example')
+            .having(
+              (e) => e.allowsAutomaticSourceRecovery,
+              'automatic restart',
+              isFalse,
+            ),
+      ),
+    );
+    expect(progress.last, [190, 1000]);
+    expect(calls, everyElement('status'));
+  });
 
   test(
     'Android checks expected size and headroom without deleting anything',

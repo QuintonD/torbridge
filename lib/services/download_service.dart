@@ -10,10 +10,20 @@ typedef DownloadProgressCallback = void Function(int received, int total);
 typedef DownloadEnqueuedCallback = void Function(String platformId);
 
 class DownloadFailureException implements Exception {
-  const DownloadFailureException(this.reason, {this.host});
+  const DownloadFailureException(
+    this.reason, {
+    this.host,
+    this.receivedBytes = 0,
+  });
 
   final int reason;
   final String? host;
+  final int receivedBytes;
+
+  // A new DownloadManager job cannot resume the old job's bytes. In particular,
+  // 1008 can follow a partial transfer even when the final byte counter is zero.
+  bool get allowsAutomaticSourceRecovery =>
+      isRetryableSourceFailure && reason != 1008 && receivedBytes == 0;
 
   bool get isRetryableSourceFailure =>
       reason == 400 ||
@@ -295,14 +305,24 @@ class AndroidSystemDownloadService extends DownloadService {
     int id,
     DownloadProgressCallback onProgress,
   ) async {
+    var mostReceived = 0;
+    var lastTotal = -1;
     await Future<void>.delayed(const Duration(seconds: 1));
     while (true) {
       final status = await _channel.invokeMapMethod<String, dynamic>('status', {
         'id': id,
       });
       if (status == null) throw StateError('Android lost the download record.');
-      final received = (status['downloaded'] as num?)?.toInt() ?? 0;
-      final total = (status['total'] as num?)?.toInt() ?? -1;
+      var received = (status['downloaded'] as num?)?.toInt() ?? 0;
+      var total = (status['total'] as num?)?.toInt() ?? -1;
+      if (received > mostReceived) mostReceived = received;
+      if (total > 0) lastTotal = total;
+      // Failed platform records can lose their counters. Keep the observed
+      // progress as evidence, without implying those bytes are still readable.
+      if (status['state'] == 'failed') {
+        received = mostReceived;
+        if (total <= 0) total = lastTotal;
+      }
       final message = switch (status['state']) {
         'queued' => 'Waiting for Android to start the download…',
         'paused' => switch (status['reason']) {
@@ -342,6 +362,7 @@ class AndroidSystemDownloadService extends DownloadService {
           throw DownloadFailureException(
             reason,
             host: status['host'] as String?,
+            receivedBytes: mostReceived,
           );
         case 'missing':
           throw StateError('Android no longer has this download.');

@@ -3,6 +3,14 @@
 Installable files are available in [GitHub Releases](https://github.com/QuintonD/torbridge/releases).
 Android and Windows can have different current versions.
 
+## Android 1.2.16 - 2026-09-12
+
+- Stop silent replacement downloads after Android cannot-resume failures or
+  observed byte progress; keep the failed record and explain explicit Retry.
+- Preserve observed failure counters and expand Android network/power Diagnostics.
+- Normal Android byte-range resume remains supported. Windows stays on 1.2.15.
+- See [release notes](docs/releases/v1.2.16.md) for validation and device limits.
+
 ## Android and Windows 1.2.15 - 2026-09-11
 
 - Enable encrypted phone-to-phone setup with Android QR export and import.

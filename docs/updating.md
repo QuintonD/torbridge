@@ -47,11 +47,17 @@ the same Wi-Fi, compare the codes, and confirm the import. Connections and
 download rules are copied; local files and watched history are not.
 See the [phone setup guide](phone-setup-transfer.md).
 
+From 1.2.16, Android stops automatic replacement of interrupted downloads that
+cannot resume; explicit Retry starts a new transfer from zero. Normal Android
+range resumption remains available.
+
 If Android refuses an update, note its exact message and your currently installed
 version. Do not uninstall as a first troubleshooting step. Report the details in
 [a bug report](https://github.com/QuintonD/torbridge/issues/new?template=bug_report.yml).
 
 ## Windows
+
+The current Windows build remains 1.2.15.
 
 Download the Windows ZIP from the release linked on the repository home page.
 Android-only releases do not include a new Windows build.

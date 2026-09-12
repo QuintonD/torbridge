@@ -350,7 +350,7 @@ void main() {
     expect(controller.state.downloads, isEmpty);
   });
 
-  for (final reason in [400, 502, 1008]) {
+  for (final reason in [400, 502, 1004]) {
     test('Android failure $reason retries with a fresh TorBox link', () async {
       final downloads = _RetryingDownloadService(reason);
       final credentials = _MemoryCredentials()
@@ -749,6 +749,7 @@ class _SlowAioStreamsClient extends AioStreamsClient {
 class _RetryingDownloadService extends DownloadService {
   _RetryingDownloadService([this.reason = 502]);
   final int reason;
+  int receivedBytes = 0;
   final List<Uri> urls = [];
   final List<String?> cancelledPlatformIds = [];
   final List<Map<String, String>> headers = [];
@@ -766,7 +767,8 @@ class _RetryingDownloadService extends DownloadService {
     headers.add(requestHeaders);
     if (urls.length == 1) {
       onEnqueued?.call('direct-id');
-      throw DownloadFailureException(reason);
+      onProgress(receivedBytes, 1000);
+      throw DownloadFailureException(reason, receivedBytes: receivedBytes);
     }
     onEnqueued?.call('fallback-id');
     onProgress(1, 1);
@@ -1777,6 +1779,85 @@ class _StorageDuringRecovery extends _RecordingDownloadService {
 }
 
 void downloadRecoveryRegressions() {
+  for (final reason in [1008, 1004, 403, 429, 502]) {
+    test(
+      'partial Android failure $reason preserves the job without restarting',
+      () async {
+        final service = _RetryingDownloadService(reason)..receivedBytes = 190;
+        final store = _MemoryStateStore();
+        final controller = TorBridgeController(
+          service,
+          _FakeBridge(),
+          _MemoryCredentials()
+            ..value = const StoredConnections(torBoxToken: 'token'),
+          CinemetaClient(),
+          AioStreamsClient(),
+          store,
+          (_) => _FakeTorBoxClient(),
+        );
+        addTearDown(controller.dispose);
+        await controller.initialize();
+        await controller.downloadCandidate(_fallbackCandidate);
+        final job = controller.state.downloads.single;
+        expect(service.urls, hasLength(1));
+        expect(service.cancelledPlatformIds, isEmpty);
+        expect(job.platformId, 'direct-id');
+        expect(job.status, DownloadStatus.failed);
+        expect(job.receivedBytes, 190);
+        expect(job.progress, .19);
+        expect(job.error, contains('Automatic restart stopped'));
+        expect(job.error, contains('Android reason $reason'));
+        expect(store.value.downloadRecords.single['platformId'], 'direct-id');
+        // An explicit retry remains available after inspecting the connection.
+        await controller.retryDownload(job);
+        expect(
+          controller.state.downloads.single.status,
+          DownloadStatus.complete,
+        );
+        expect(service.urls, hasLength(2));
+      },
+    );
+  }
+
+  for (final bytes in [0, 190]) {
+    testWidgets(
+      'restored cannot-resume failure with $bytes saved bytes never restarts',
+      (tester) async {
+        final service = _SerialFixtureDownloads()..resumeFailure = 1008;
+        final store = _MemoryStateStore()
+          ..value = StoredLocalState(
+            downloadRecords: [
+              {
+                ..._savedTransfer('saved', platformId: 'old-id'),
+                'receivedBytes': bytes,
+              },
+            ],
+          );
+        final controller = TorBridgeController(
+          service,
+          _FakeBridge(),
+          _MemoryCredentials()
+            ..value = const StoredConnections(torBoxToken: 'token'),
+          CinemetaClient(),
+          AioStreamsClient(),
+          store,
+          (_) => _FakeTorBoxClient(),
+        );
+        await controller.initialize();
+        await tester.pump();
+        expect(service.urls, isEmpty);
+        expect(service.deleted, isEmpty);
+        expect(controller.state.downloads.single.platformId, 'old-id');
+        expect(controller.state.downloads.single.status, DownloadStatus.failed);
+        expect(
+          controller.state.downloads.single.error,
+          contains('Automatic restart stopped'),
+        );
+        controller.dispose();
+      },
+    );
+  }
+
   test('persistent HTTP 400 stops after bounded recovery and names the attempted host', () async {
     final service = _StorageDuringRecovery()..finalFailure = 400;
     final credentials = _MemoryCredentials()
@@ -1845,7 +1926,7 @@ void downloadRecoveryRegressions() {
     controller.dispose();
   });
 
-  for (final reason in [400, 1008]) {
+  for (final reason in [400, 1004]) {
     testWidgets(
       'restored Android failure $reason recovers after credentials load',
       (tester) async {
@@ -2346,7 +2427,7 @@ void pixelNetworkRegressions() {
       await controller.initialize();
       await tester.pump();
       service.restored['old1']!.completeError(
-        const DownloadFailureException(1008),
+        const DownloadFailureException(1004),
       );
       await tester.pump();
       expect(
@@ -2354,7 +2435,7 @@ void pixelNetworkRegressions() {
         DownloadStatus.waitingForNetwork,
       );
       service.restored['old2']!.completeError(
-        const DownloadFailureException(1008),
+        const DownloadFailureException(1004),
       );
       await tester.pump();
       expect(
