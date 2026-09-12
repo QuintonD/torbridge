@@ -14,11 +14,11 @@ video downloads, built-in playback, Stremio integration, and optional Trakt sync
 
 | Your device | Current build | Download |
 | --- | --- | --- |
-| **Pixel 7a, Galaxy S25, and other ARM64 phones** | Android **1.2.15**, 42.6 MB | **[Download ARM64 APK](https://github.com/QuintonD/torbridge/releases/download/v1.2.15/TorBridge-Android-1.2.15-arm64.apk)** |
-| Other supported Android architectures | Android **1.2.15**, 121.6 MB | [Download universal APK](https://github.com/QuintonD/torbridge/releases/download/v1.2.15/TorBridge-Android-1.2.15.apk) |
+| **Pixel 7a, Galaxy S25, and other ARM64 phones** | Android **1.2.16**, 42.6 MB | **[Download ARM64 APK](https://github.com/QuintonD/torbridge/releases/download/v1.2.16/TorBridge-Android-1.2.16-arm64.apk)** |
+| Other supported Android architectures | Android **1.2.16**, 121.6 MB | [Download universal APK](https://github.com/QuintonD/torbridge/releases/download/v1.2.16/TorBridge-Android-1.2.16.apk) |
 | Windows x64 | Windows **1.2.15**, 34.1 MB | [Download Windows ZIP](https://github.com/QuintonD/torbridge/releases/download/v1.2.15/TorBridge-Windows-x64-1.2.15.zip) |
 
-[Release notes](https://github.com/QuintonD/torbridge/releases/tag/v1.2.15) · [SHA-256 checksums](https://github.com/QuintonD/torbridge/releases/download/v1.2.15/SHA256SUMS.txt) · [All releases](https://github.com/QuintonD/torbridge/releases)
+[Android release notes](https://github.com/QuintonD/torbridge/releases/tag/v1.2.16) · [SHA-256 checksums](https://github.com/QuintonD/torbridge/releases/download/v1.2.16/SHA256SUMS.txt) · [All releases](https://github.com/QuintonD/torbridge/releases)
 
 ### Updating an existing installation
 
@@ -34,21 +34,25 @@ See the [installation and update guide](docs/updating.md) for details. GitHub's
 **Source code** archives are for development, not installation. Android builds
 are signed for personal sideloading and are not distributed through Google Play.
 
-### What's new in 1.2.15
+### What's new in Android 1.2.16
 
-Copy setup directly between Android phones. Update both phones, then open
-**Settings → Transfer setup → Show setup QR** on the configured phone and
-**Scan setup QR** on the receiving phone. Keep both unlocked on the same Wi-Fi,
-compare the codes and confirm import. Connections and download preferences
-transfer securely; downloaded files and local watched history stay in place.
-Windows-to-phone setup remains available.
+Interrupted downloads that Android cannot resume now stop with an explanation
+instead of silently starting replacement downloads from zero. Failed records
+and observed progress remain available for inspection. Normal Android resume
+continues when the server supports it; explicit Retry starts a new transfer.
+Diagnostics includes additional network and battery information.
 
-Validation: **118 host tests**, an **Android API 36 emulator transfer test**,
-clean analysis, signed APK/ABI checks, complete Windows bundle verification,
-and re-downloaded release assets matching SHA-256/GitHub digests. Physical
-S25-to-Pixel camera scanning and Android 17 remain untested. This update does
-not change download recovery. See the [setup guide and review](docs/phone-setup-transfer.md)
-and [release notes](docs/releases/v1.2.15.md).
+Validation: clean local analysis, **126 host tests** and **10 Android API 36
+integration tests**, APK signature/version/ABI verification, and downloaded
+release assets matching SHA-256 hashes and GitHub digests. GitHub CI was skipped.
+Physical Pixel 7a / Android 17 testing remains outstanding. This does not repair
+Wi-Fi instability or guarantee cleanup of all temporary files. See the
+[release notes](docs/releases/v1.2.16.md) and
+[investigation](docs/pixel-download-restarts.md).
+
+Windows remains on **1.2.15**, including encrypted phone/desktop setup transfer.
+Its [release notes and checksums](https://github.com/QuintonD/torbridge/releases/tag/v1.2.15)
+remain available.
 
 ## A look inside
 
